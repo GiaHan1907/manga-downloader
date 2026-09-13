@@ -40,9 +40,10 @@ Start the GUI:
 py manga_gui.py
 ```
 
-On Windows, double-click `run.bat` to launch the GUI in a detached process. The
-GUI will continue running if the terminal window is closed. If Python cannot be
-found, the launcher displays an error instead of silently exiting.
+On Windows, double-click `run.bat` to launch the GUI with `pythonw.exe` in a
+detached process. The GUI continues running if the terminal window is closed.
+The launcher resolves the `pythonw.exe` path from the active Python launcher and
+does not fall back to a console-based `py.exe` process.
 
 Choose `English` or `Tiếng Việt` from the language selector. The URL and output
 folder fields start empty so they can be filled with your own values. Choose the
