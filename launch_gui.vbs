@@ -1,35 +1,37 @@
 Option Explicit
 
-Dim shell, fso, scriptPath, launcherPath, commandLine
+Dim shell, fso, scriptPath, bootstrapPath, pyPath, commandLine
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 
+If WScript.Arguments.Count < 1 Then
+    shell.Popup "The launcher did not receive the GUI script path.", 5, "Manga Downloader", 16
+    WScript.Quit 1
+End If
+
 scriptPath = WScript.Arguments(0)
-launcherPath = ""
+bootstrapPath = fso.BuildPath(fso.GetParentFolderName(scriptPath), "detached_gui.py")
+pyPath = shell.ExpandEnvironmentStrings("%WINDIR%") & "\py.exe"
 
-' The Python launcher is installed as pyw.exe in the Windows directory.
-' It selects the same Python installation as py.exe but never opens a console.
-Dim windowsPyw
-windowsPyw = shell.ExpandEnvironmentStrings("%WINDIR%") & "\pyw.exe"
-If fso.FileExists(windowsPyw) Then
-    launcherPath = windowsPyw
+If Not fso.FileExists(scriptPath) Then
+    shell.Popup "The GUI script was not found:" & vbCrLf & scriptPath, 5, "Manga Downloader", 16
+    WScript.Quit 1
 End If
 
-If launcherPath = "" Then
-    If fso.FileExists("pythonw.exe") Then
-        launcherPath = "pythonw.exe"
-    End If
+If Not fso.FileExists(bootstrapPath) Then
+    shell.Popup "The detached launcher was not found:" & vbCrLf & bootstrapPath, 5, "Manga Downloader", 16
+    WScript.Quit 1
 End If
 
-If launcherPath = "" Then
-    shell.Popup "pyw.exe/pythonw.exe was not found. Install Python 3.10+ and try again.", 5, "Manga Downloader", 16
+If Not fso.FileExists(pyPath) Then
+    shell.Popup "The Python launcher was not found:" & vbCrLf & pyPath, 5, "Manga Downloader", 16
     WScript.Quit 1
 End If
 
 shell.CurrentDirectory = fso.GetParentFolderName(scriptPath)
-commandLine = Quote(launcherPath) & " " & Quote(scriptPath)
+commandLine = Quote(pyPath) & " " & Quote(bootstrapPath) & " " & Quote(scriptPath)
 
-' Window style 0 = hidden; False = do not wait for the GUI process.
+' Run the bootstrapper hidden and return immediately.
 shell.Run commandLine, 0, False
 
 Function Quote(value)
