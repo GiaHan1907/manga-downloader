@@ -40,10 +40,11 @@ Start the GUI:
 py manga_gui.py
 ```
 
-On Windows, double-click `run.bat` to launch the GUI with `pythonw.exe` in a
-detached process. The GUI continues running if the terminal window is closed.
-The launcher resolves the `pythonw.exe` path from the active Python launcher and
-does not fall back to a console-based `py.exe` process.
+On Windows, double-click `run.bat` to launch the GUI through a detached
+Windows Script Host process. The batch terminal exits immediately, while the
+GUI continues running independently. `launch_gui.vbs` resolves the
+`pythonw.exe` path from the active Python launcher and never runs the GUI
+through a console-based `py.exe` process.
 
 Choose `English` or `Tiếng Việt` from the language selector. The URL and output
 folder fields start empty so they can be filled with your own values. Choose the
