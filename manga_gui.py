@@ -264,6 +264,10 @@ class MangaGui:
         self.url_var = tk.StringVar(value="")
         self.output_var = tk.StringVar(value="")
         self.language_var = tk.StringVar(value="en")
+        # Plain attribute mirrored from language_var on the main thread so
+        # background threads (system tray) can resolve labels without
+        # touching tkinter variables.
+        self.current_language = "en"
         self.text_widgets = {}
         self.chapter_count = tk.IntVar(value=1)
         self.delay_var = tk.DoubleVar(value=1.0)
@@ -304,7 +308,8 @@ class MangaGui:
             pass
 
     def text(self, key: str, language: str | None = None, **values) -> str:
-        language = language or self.language_var.get()
+        if language is None:
+            language = self.current_language
         return UI_TEXT[language][key].format(**values)
 
     def register_text(self, key: str, widget):
@@ -408,7 +413,8 @@ class MangaGui:
     def change_language(self, _event=None):
         selected = self.language_combo.get()
         self.language_var.set("vi" if selected == "Tiếng Việt" else "en")
-        language = self.language_var.get()
+        self.current_language = "vi" if selected == "Tiếng Việt" else "en"
+        language = self.current_language
         self.root.title(self.text("window_title", language))
         for key, widget in self.text_widgets.items():
             widget.configure(text=self.text(key, language))
@@ -690,7 +696,7 @@ class MangaGui:
         overwrite = self.overwrite_var.get()
         convert_webp = self.convert_var.get()
         create_cbz_option = self.cbz_var.get()
-        language = self.language_var.get()
+        language = self.current_language
 
         self.stop_event.clear()
         self.status_text.set(self.text("downloading", language))
