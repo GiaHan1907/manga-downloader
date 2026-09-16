@@ -18,6 +18,8 @@ other access controls.
 - Create one `.cbz` archive per chapter.
 - Shows per-page and overall chapter progress.
 - Keeps a persistent download history with status and details.
+- Provides a searchable history view matching manga URLs, output paths, statuses, and details.
+- Includes functional History and Settings workspace views from the sidebar.
 - Minimizes to the Windows system tray when the window is closed.
 - Includes a command-line interface for scripted downloads.
 

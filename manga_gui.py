@@ -43,7 +43,7 @@ UI_TEXT = {
         "window_title": "Manga Downloader",
         "tagline": "Reader & archive workspace",
         "nav_downloader": "▣   Downloader",
-        "nav_archive": "▤   Archive",
+        "nav_archive": "▤   History",
         "nav_settings": "⚙   Settings",
         "local_workspace": "●  LOCAL WORKSPACE",
         "local_description": "Files stay on this computer",
@@ -111,12 +111,16 @@ UI_TEXT = {
         "tray_exit": "Exit",
         "tray_hint": "Manga Downloader is still running in the system tray.",
         "ui_badge": "MANUS WORKSPACE",
+        "search_history": "Search manga, URL, or status",
+        "settings_title": "Workspace settings",
+        "settings_note": "Download defaults and appearance controls will be expanded in a later phase.",
+        "settings_output": "Current output folder",
     },
     "vi": {
         "window_title": "Manga Downloader",
         "tagline": "Không gian tải và lưu trữ truyện",
         "nav_downloader": "▣   Trình tải truyện",
-        "nav_archive": "▤   Kho lưu trữ",
+        "nav_archive": "▤   Lịch sử tải",
         "nav_settings": "⚙   Cài đặt",
         "local_workspace": "●  KHÔNG GIAN CỤC BỘ",
         "local_description": "Tệp được lưu trên máy này",
@@ -184,6 +188,10 @@ UI_TEXT = {
         "tray_exit": "Thoát",
         "tray_hint": "Manga Downloader vẫn đang chạy trong khay hệ thống.",
         "ui_badge": "MANUS WORKSPACE",
+        "search_history": "Tìm manga, URL hoặc trạng thái",
+        "settings_title": "Cài đặt không gian làm việc",
+        "settings_note": "Các thiết lập tải xuống và giao diện sẽ được mở rộng ở phase tiếp theo.",
+        "settings_output": "Thư mục lưu hiện tại",
     },
 }
 
@@ -250,6 +258,8 @@ class MangaGui:
         self.history_records: list[dict[str, str]] = []
         self.current_history_id: str | None = None
         self.load_history()
+        self.current_page = "downloader"
+        self.page_frames: dict[str, tk.Widget] = {}
 
         self.url_var = tk.StringVar(value="")
         self.output_var = tk.StringVar(value="")
@@ -260,6 +270,7 @@ class MangaGui:
         self.overwrite_var = tk.BooleanVar(value=False)
         self.convert_var = tk.BooleanVar(value=True)
         self.cbz_var = tk.BooleanVar(value=True)
+        self.history_search_var = tk.StringVar(value="")
         self.page_progress_text = tk.StringVar(value=UI_TEXT["en"]["page_not_started"])
         self.overall_progress_text = tk.StringVar(value=UI_TEXT["en"]["overall_not_started"])
         self.status_text = tk.StringVar(value=UI_TEXT["en"]["ready"])
@@ -379,10 +390,20 @@ class MangaGui:
     def refresh_history(self):
         if not hasattr(self, "history_tree"):
             return
-        for item in self.history_tree.get_children():
-            self.history_tree.delete(item)
-        for record in reversed(self.history_records[-30:]):
-            self.history_tree.insert("", "end", iid=record.get("id"), values=(record.get("time", ""), record.get("source", ""), record.get("status", ""), record.get("details", "")))
+        trees = [self.history_tree]
+        if hasattr(self, "history_detail_tree"):
+            trees.append(self.history_detail_tree)
+        query = self.history_search_var.get().strip().lower()
+        records = []
+        for record in reversed(self.history_records[-100:]):
+            searchable = " ".join(str(record.get(key, "")) for key in ("source", "output", "status", "details")).lower()
+            if not query or query in searchable:
+                records.append(record)
+        for tree in trees:
+            for item in tree.get_children():
+                tree.delete(item)
+            for record in records[:30]:
+                tree.insert("", "end", iid=f"{id(tree)}-{record.get('id')}", values=(record.get("time", ""), record.get("source", ""), record.get("status", ""), record.get("details", "")))
 
     def change_language(self, _event=None):
         selected = self.language_combo.get()
@@ -446,19 +467,21 @@ class MangaGui:
         self.register_text("tagline", tk.Label(sidebar, text="", bg=self.colors["sidebar"], fg=self.colors["muted"], font=("Segoe UI", 9))).pack(anchor="w", padx=23, pady=(0, 30))
         tk.Frame(sidebar, bg=self.colors["border"], height=1).pack(fill="x", padx=20, pady=(0, 20))
 
-        def nav_button(text, active=False):
+        def nav_button(text, active=False, command=None):
             return tk.Button(
                 sidebar, text=text, anchor="w", relief="flat", bd=0, cursor="hand2",
                 bg=self.colors["accent"] if active else self.colors["sidebar"],
                 fg="white" if active else self.colors["muted"],
                 activebackground=self.colors["accent_hover"] if active else "#17212c",
                 activeforeground="white", font=("Segoe UI", 10, "bold" if active else "normal"),
-                padx=22, pady=12,
+                padx=22, pady=12, command=command,
             )
 
         self.register_text("nav_downloader", nav_button("", active=True)).pack(fill="x", padx=12, pady=2)
-        self.register_text("nav_archive", nav_button("")).pack(fill="x", padx=12, pady=2)
-        self.register_text("nav_settings", nav_button("")).pack(fill="x", padx=12, pady=2)
+        history_nav = nav_button("", command=self.show_history_window)
+        settings_nav = nav_button("", command=self.show_settings_window)
+        self.register_text("nav_archive", history_nav).pack(fill="x", padx=12, pady=2)
+        self.register_text("nav_settings", settings_nav).pack(fill="x", padx=12, pady=2)
 
         sidebar_bottom = tk.Frame(sidebar, bg=self.colors["sidebar"])
         sidebar_bottom.pack(side="bottom", fill="x", padx=20, pady=20)
@@ -551,7 +574,13 @@ class MangaGui:
         history_card = ttk.Frame(main, style="Card.TFrame", padding=14)
         history_card.grid(row=6, column=0, sticky="ew", pady=(0, 16))
         history_card.columnconfigure(0, weight=1)
-        self.register_text("history", ttk.Label(history_card, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        history_header = ttk.Frame(history_card, style="Card.TFrame")
+        history_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        history_header.columnconfigure(0, weight=1)
+        self.register_text("history", ttk.Label(history_header, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w")
+        self.history_search_entry = ttk.Entry(history_header, textvariable=self.history_search_var, width=34)
+        self.history_search_entry.grid(row=0, column=1, sticky="e")
+        self.history_search_var.trace_add("write", lambda *_args: self.refresh_history())
         self.history_tree = ttk.Treeview(history_card, columns=("time", "source", "status", "details"), show="headings", height=4)
         for column, width in (("time", 145), ("source", 360), ("status", 120), ("details", 260)):
             self.history_tree.heading(column, text=self.text(f"history_{column}"))
@@ -576,6 +605,43 @@ class MangaGui:
         tk.Label(status, textvariable=self.status_text, bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(6, 0))
         self.register_text("privacy", tk.Label(status, text="", bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 8))).pack(side="right")
         self.change_language()
+
+    def show_history_window(self):
+        self._show_auxiliary_window("history")
+
+    def show_settings_window(self):
+        self._show_auxiliary_window("settings")
+
+    def _show_auxiliary_window(self, kind: str):
+        window = tk.Toplevel(self.root)
+        window.configure(bg=self.colors["bg"])
+        window.geometry("900x520" if kind == "history" else "620x360")
+        window.minsize(560, 300)
+        window.iconphoto(True, self.icon_photo)
+        if kind == "history":
+            window.title(self.text("history"))
+            shell = ttk.Frame(window, style="App.TFrame", padding=24)
+            shell.pack(fill="both", expand=True)
+            shell.columnconfigure(0, weight=1)
+            shell.rowconfigure(2, weight=1)
+            ttk.Label(shell, text=self.text("history"), style="Title.TLabel").grid(row=0, column=0, sticky="w")
+            search = ttk.Entry(shell, textvariable=self.history_search_var)
+            search.grid(row=1, column=0, sticky="ew", pady=(16, 12))
+            tree = ttk.Treeview(shell, columns=("time", "source", "status", "details"), show="headings")
+            for column in ("time", "source", "status", "details"):
+                tree.heading(column, text=self.text(f"history_{column}"))
+                tree.column(column, width=150 if column != "source" else 330, anchor="w", stretch=True)
+            tree.grid(row=2, column=0, sticky="nsew")
+            self.history_detail_tree = tree
+            self.refresh_history()
+        else:
+            window.title(self.text("settings_title"))
+            shell = ttk.Frame(window, style="App.TFrame", padding=28)
+            shell.pack(fill="both", expand=True)
+            ttk.Label(shell, text=self.text("settings_title"), style="Title.TLabel").pack(anchor="w")
+            ttk.Label(shell, text=self.text("settings_note"), style="Subtitle.TLabel", wraplength=540).pack(anchor="w", pady=(12, 24))
+            ttk.Label(shell, text=self.text("settings_output"), style="CardText.TLabel").pack(anchor="w")
+            ttk.Label(shell, textvariable=self.output_var, style="Subtitle.TLabel").pack(anchor="w", pady=(6, 0))
 
     def choose_output(self):
         selected = filedialog.askdirectory(title=self.text("choose_folder"))

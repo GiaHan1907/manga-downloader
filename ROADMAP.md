@@ -55,9 +55,13 @@ Acceptance: clean standalone EXE build and no orphan process after tray exit.
 
 ### Phase 1 — UI and UX foundation
 
-**Status: Planned.**
+**Status: In progress — initial navigation and history search implemented.**
 
 - Make sidebar navigation functional: Downloader, History, Archive, Settings.
+- Current checkpoint: the second sidebar item now opens a dedicated searchable
+  History window; Settings opens a dedicated settings placeholder window. The
+  main Downloader view also has a live history filter.
+- Search matches source URL, output path, status, and details.
 - Add clear state labels: Ready, Preparing, Downloading, Converting, Creating CBZ, Complete, Failed.
 - Make the activity log collapsible or move it to a detail panel.
 - Add open-output-folder action and tooltips.
