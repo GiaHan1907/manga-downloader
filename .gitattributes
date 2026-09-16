@@ -1,0 +1,10 @@
+# Normalize all text files to LF in the repository and the working tree.
+# Windows-only script files keep CRLF because cmd.exe and wscript.exe require it.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+
+*.png binary
+*.ico binary
