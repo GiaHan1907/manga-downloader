@@ -6,7 +6,6 @@ env/
 downloads/
 dist/
 build/
-*.spec
 .DS_Store
 
 .freebuff/
