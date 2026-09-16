@@ -7,6 +7,9 @@ import queue
 import re
 import threading
 import zipfile
+import json
+import sys
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -16,6 +19,23 @@ import requests
 from PIL import Image, ImageOps
 
 import download_manga as downloader
+
+try:
+    import pystray
+    from PIL import ImageDraw
+except ImportError:  # Tray support is optional during source-based development.
+    pystray = None
+    ImageDraw = None
+
+try:
+    import winsound
+except ImportError:  # Keep the GUI importable on non-Windows systems.
+    winsound = None
+
+
+def resource_path(filename: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / filename
 
 
 UI_TEXT = {
@@ -74,6 +94,7 @@ UI_TEXT = {
         "missing_folder": "Missing folder",
         "choose_folder_first": "Choose an output folder first.",
         "download_failed": "Download failed",
+        "download_complete": "Download complete",
         "page_progress": "Chapter progress: {chapter} — {current}/{total} pages",
         "status_downloading": "Downloading {chapter}",
         "overall_progress": "Overall progress: {current}/{total} chapters",
@@ -81,6 +102,15 @@ UI_TEXT = {
         "status_stopped": "Stopped",
         "status_complete": "Complete",
         "status_error": "Error",
+        "history": "DOWNLOAD HISTORY",
+        "history_time": "Time",
+        "history_source": "Source",
+        "history_status": "Status",
+        "history_details": "Details",
+        "tray_show": "Show window",
+        "tray_exit": "Exit",
+        "tray_hint": "Manga Downloader is still running in the system tray.",
+        "ui_badge": "MANUS WORKSPACE",
     },
     "vi": {
         "window_title": "Manga Downloader",
@@ -137,6 +167,7 @@ UI_TEXT = {
         "missing_folder": "Thiếu thư mục",
         "choose_folder_first": "Hãy chọn thư mục lưu trước.",
         "download_failed": "Tải thất bại",
+        "download_complete": "Tải hoàn tất",
         "page_progress": "Tiến trình chương: {chapter} — {current}/{total} trang",
         "status_downloading": "Đang tải {chapter}",
         "overall_progress": "Tổng tiến trình: {current}/{total} chương",
@@ -144,6 +175,15 @@ UI_TEXT = {
         "status_stopped": "Đã dừng",
         "status_complete": "Hoàn tất",
         "status_error": "Có lỗi",
+        "history": "LỊCH SỬ TẢI XUỐNG",
+        "history_time": "Thời gian",
+        "history_source": "Nguồn",
+        "history_status": "Trạng thái",
+        "history_details": "Chi tiết",
+        "tray_show": "Mở cửa sổ",
+        "tray_exit": "Thoát",
+        "tray_hint": "Manga Downloader vẫn đang chạy trong khay hệ thống.",
+        "ui_badge": "MANUS WORKSPACE",
     },
 }
 
@@ -195,13 +235,21 @@ def create_cbz(chapter_dir: Path) -> Path:
 class MangaGui:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Manga Downloader")
-        self.root.geometry("1120x760")
-        self.root.minsize(960, 650)
+        self.root.title("Manga Downloader · Manus Workspace")
+        self.root.geometry("1180x800")
+        self.root.minsize(1000, 700)
+        self.icon_photo = tk.PhotoImage(file=str(resource_path("MangaDownloader.png")))
+        self.root.iconphoto(True, self.icon_photo)
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
+        self.closing = False
+        self.tray_icon = None
+        self.history_file = self.get_history_file()
+        self.history_records: list[dict[str, str]] = []
+        self.current_history_id: str | None = None
+        self.load_history()
 
         self.url_var = tk.StringVar(value="")
         self.output_var = tk.StringVar(value="")
@@ -218,7 +266,31 @@ class MangaGui:
 
         self.setup_theme()
         self.build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.start_tray()
         self.root.after(100, self.process_events)
+
+    @staticmethod
+    def get_history_file() -> Path:
+        base = Path.home() / "AppData" / "Roaming" / "MangaDownloader"
+        if sys.platform != "win32":
+            base = Path.home() / ".manga-downloader"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "download_history.json"
+
+    def load_history(self):
+        try:
+            self.history_records = json.loads(self.history_file.read_text(encoding="utf-8"))
+            if not isinstance(self.history_records, list):
+                self.history_records = []
+        except (OSError, ValueError):
+            self.history_records = []
+
+    def save_history(self):
+        try:
+            self.history_file.write_text(json.dumps(self.history_records[-100:], ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
     def text(self, key: str, language: str | None = None, **values) -> str:
         language = language or self.language_var.get()
@@ -227,6 +299,90 @@ class MangaGui:
     def register_text(self, key: str, widget):
         self.text_widgets[key] = widget
         return widget
+
+    def tray_image(self):
+        try:
+            with Image.open(resource_path("MangaDownloader.png")) as source:
+                return source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
+        except (OSError, ValueError):
+            image = Image.new("RGBA", (64, 64), (124, 92, 255, 255))
+            if ImageDraw is not None:
+                draw = ImageDraw.Draw(image)
+                draw.ellipse((10, 10, 54, 54), fill=(17, 24, 35, 255), outline=(241, 245, 249, 255), width=3)
+            return image
+
+    def start_tray(self):
+        if pystray is None:
+            return
+        menu = pystray.Menu(
+            pystray.MenuItem(lambda _item: self.text("tray_show"), lambda _icon, _item: self.show_window()),
+            pystray.MenuItem(lambda _item: self.text("tray_exit"), lambda _icon, _item: self.exit_application()),
+        )
+        self.tray_icon = pystray.Icon("manga_downloader", self.tray_image(), "Manga Downloader", menu)
+        threading.Thread(target=self.tray_icon.run, name="system-tray", daemon=True).start()
+
+    def show_window(self):
+        self.root.after(0, self._show_window)
+
+    def _show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def on_close(self):
+        if self.closing:
+            return
+        if self.tray_icon is None:
+            self._exit_application()
+            return
+        if self.worker and self.worker.is_alive():
+            self.root.withdraw()
+            return
+        self.root.withdraw()
+
+    def exit_application(self):
+        self.root.after(0, self._exit_application)
+
+    def _exit_application(self):
+        if self.worker and self.worker.is_alive():
+            self.stop_event.set()
+        self.closing = True
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+        self.root.destroy()
+
+    def add_history(self, url: str, output_root: Path, selected_count: int):
+        record = {
+            "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": url,
+            "output": str(output_root),
+            "status": "Downloading",
+            "details": "0 chapters completed",
+        }
+        self.current_history_id = record["id"]
+        self.history_records.append(record)
+        self.save_history()
+        self.refresh_history()
+
+    def update_history(self, status: str, details: str):
+        if not self.current_history_id:
+            return
+        for record in reversed(self.history_records):
+            if record.get("id") == self.current_history_id:
+                record["status"] = status
+                record["details"] = details
+                break
+        self.save_history()
+        self.refresh_history()
+
+    def refresh_history(self):
+        if not hasattr(self, "history_tree"):
+            return
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+        for record in reversed(self.history_records[-30:]):
+            self.history_tree.insert("", "end", iid=record.get("id"), values=(record.get("time", ""), record.get("source", ""), record.get("status", ""), record.get("details", "")))
 
     def change_language(self, _event=None):
         selected = self.language_combo.get()
@@ -242,53 +398,53 @@ class MangaGui:
 
     def setup_theme(self):
         self.colors = {
-            "bg": "#0b0f14",
-            "sidebar": "#0d131b",
-            "card": "#131b25",
-            "input": "#0f1721",
-            "border": "#263342",
-            "text": "#e6edf3",
-            "muted": "#8b98a8",
-            "accent": "#3b82f6",
-            "accent_hover": "#5293ff",
-            "green": "#35c48b",
+            "bg": "#080b12",
+            "sidebar": "#0b1019",
+            "card": "#111823",
+            "input": "#0c131d",
+            "border": "#202c3b",
+            "text": "#f1f5f9",
+            "muted": "#94a3b8",
+            "accent": "#7c5cff",
+            "accent_hover": "#9278ff",
+            "green": "#49d69c",
             "danger": "#f87171",
         }
         self.root.configure(bg=self.colors["bg"])
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure("App.TFrame", background=self.colors["bg"])
-        style.configure("Card.TFrame", background=self.colors["card"])
-        style.configure("Title.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI", 22, "bold"))
+        style.configure("Card.TFrame", background=self.colors["card"], borderwidth=1, relief="solid")
+        style.configure("Title.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI", 24, "bold"))
         style.configure("Subtitle.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 10))
         style.configure("CardTitle.TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 10, "bold"))
         style.configure("CardText.TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 10))
-        style.configure("Muted.TLabel", background=self.colors["card"], foreground=self.colors["muted"], font=("Segoe UI", 9))
-        style.configure("TEntry", fieldbackground=self.colors["input"], foreground=self.colors["text"], insertcolor=self.colors["text"], bordercolor=self.colors["border"], lightcolor=self.colors["border"], darkcolor=self.colors["border"], padding=9)
+        style.configure("Muted.TLabel", background=self.colors["card"], foreground=self.colors["muted"], font=("Segoe UI", 9, "bold"))
+        style.configure("TEntry", fieldbackground=self.colors["input"], foreground=self.colors["text"], insertcolor=self.colors["text"], bordercolor=self.colors["border"], lightcolor=self.colors["border"], darkcolor=self.colors["border"], padding=10)
         style.map("TEntry", bordercolor=[("focus", self.colors["accent"])], lightcolor=[("focus", self.colors["accent"])])
-        style.configure("TSpinbox", fieldbackground=self.colors["input"], foreground=self.colors["text"], arrowcolor=self.colors["muted"], bordercolor=self.colors["border"], padding=5)
-        style.configure("TButton", background="#222d3b", foreground=self.colors["text"], bordercolor=self.colors["border"], padding=(13, 8), font=("Segoe UI", 9, "bold"))
-        style.map("TButton", background=[("active", "#2d3b4d"), ("disabled", "#18212c")], foreground=[("disabled", "#687586")])
-        style.configure("Accent.TButton", background=self.colors["accent"], foreground="white", bordercolor=self.colors["accent"], padding=(16, 9), font=("Segoe UI", 10, "bold"))
-        style.map("Accent.TButton", background=[("active", self.colors["accent_hover"]), ("disabled", "#244e91")])
+        style.configure("TSpinbox", fieldbackground=self.colors["input"], foreground=self.colors["text"], arrowcolor=self.colors["muted"], bordercolor=self.colors["border"], padding=7)
+        style.configure("TButton", background="#1a2432", foreground=self.colors["text"], bordercolor=self.colors["border"], padding=(14, 9), font=("Segoe UI", 9, "bold"))
+        style.map("TButton", background=[("active", "#253247"), ("disabled", "#141c27")], foreground=[("disabled", "#64748b")])
+        style.configure("Accent.TButton", background=self.colors["accent"], foreground="white", bordercolor=self.colors["accent"], padding=(18, 10), font=("Segoe UI", 10, "bold"))
+        style.map("Accent.TButton", background=[("active", self.colors["accent_hover"]), ("disabled", "#40357c")])
         style.configure("TCheckbutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
         style.map("TCheckbutton", background=[("active", self.colors["card"])], foreground=[("disabled", "#687586")])
         style.configure("TRadiobutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
         style.map("TRadiobutton", background=[("active", self.colors["card"])], foreground=[("disabled", "#687586")])
-        style.configure("Horizontal.TProgressbar", troughcolor="#222d3b", background=self.colors["accent"], bordercolor="#222d3b", lightcolor=self.colors["accent"], darkcolor=self.colors["accent"], thickness=8)
+        style.configure("Horizontal.TProgressbar", troughcolor="#1a2534", background=self.colors["accent"], bordercolor="#1a2534", lightcolor=self.colors["accent"], darkcolor=self.colors["accent"], thickness=9)
 
     def build_ui(self):
         shell = ttk.Frame(self.root, style="App.TFrame")
         shell.pack(fill="both", expand=True)
 
-        sidebar = tk.Frame(shell, bg=self.colors["sidebar"], width=224)
+        sidebar = tk.Frame(shell, bg=self.colors["sidebar"], width=238)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
-        tk.Label(sidebar, text="✦", bg=self.colors["sidebar"], fg=self.colors["accent"], font=("Segoe UI Symbol", 28, "bold")).pack(anchor="w", padx=20, pady=(25, 0))
-        tk.Label(sidebar, text="MANGA DOWNLOADER", bg=self.colors["sidebar"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=21, pady=(0, 2))
-        self.register_text("tagline", tk.Label(sidebar, text="", bg=self.colors["sidebar"], fg=self.colors["muted"], font=("Segoe UI", 9))).pack(anchor="w", padx=21, pady=(0, 28))
-        tk.Frame(sidebar, bg=self.colors["border"], height=1).pack(fill="x", padx=18, pady=(0, 18))
+        tk.Label(sidebar, text="✦", bg=self.colors["sidebar"], fg=self.colors["accent"], font=("Segoe UI Symbol", 30, "bold")).pack(anchor="w", padx=22, pady=(28, 0))
+        tk.Label(sidebar, text="MANGA DOWNLOADER", bg=self.colors["sidebar"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=23, pady=(0, 3))
+        self.register_text("tagline", tk.Label(sidebar, text="", bg=self.colors["sidebar"], fg=self.colors["muted"], font=("Segoe UI", 9))).pack(anchor="w", padx=23, pady=(0, 30))
+        tk.Frame(sidebar, bg=self.colors["border"], height=1).pack(fill="x", padx=20, pady=(0, 20))
 
         def nav_button(text, active=False):
             return tk.Button(
@@ -297,7 +453,7 @@ class MangaGui:
                 fg="white" if active else self.colors["muted"],
                 activebackground=self.colors["accent_hover"] if active else "#17212c",
                 activeforeground="white", font=("Segoe UI", 10, "bold" if active else "normal"),
-                padx=20, pady=11,
+                padx=22, pady=12,
             )
 
         self.register_text("nav_downloader", nav_button("", active=True)).pack(fill="x", padx=12, pady=2)
@@ -309,13 +465,13 @@ class MangaGui:
         self.register_text("local_workspace", tk.Label(sidebar_bottom, text="", bg=self.colors["sidebar"], fg=self.colors["green"], font=("Segoe UI", 8, "bold"))).pack(anchor="w")
         self.register_text("local_description", tk.Label(sidebar_bottom, text="", bg=self.colors["sidebar"], fg=self.colors["muted"], font=("Segoe UI", 8))).pack(anchor="w", pady=(5, 0))
 
-        main = ttk.Frame(shell, style="App.TFrame", padding=(30, 24, 30, 18))
+        main = ttk.Frame(shell, style="App.TFrame", padding=(34, 28, 34, 20))
         main.pack(side="left", fill="both", expand=True)
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(6, weight=1)
+        main.rowconfigure(7, weight=1)
 
         header = ttk.Frame(main, style="App.TFrame")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 20))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 24))
         header.columnconfigure(0, weight=1)
         header_left = ttk.Frame(header, style="App.TFrame")
         header_left.grid(row=0, column=0, sticky="w")
@@ -323,14 +479,16 @@ class MangaGui:
         self.register_text("header_subtitle", ttk.Label(header_left, text="", style="Subtitle.TLabel")).pack(anchor="w", pady=(5, 0))
         header_right = ttk.Frame(header, style="App.TFrame")
         header_right.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        badge = tk.Label(header_right, text="", bg=self.colors["accent"], fg="white", font=("Segoe UI", 8, "bold"), padx=10, pady=5)
+        self.register_text("ui_badge", badge).pack(side="left", padx=(0, 16))
         self.register_text("language", ttk.Label(header_right, text="", style="Subtitle.TLabel")).pack(side="left", padx=(0, 8))
         self.language_combo = ttk.Combobox(header_right, values=("English", "Tiếng Việt"), state="readonly", width=13)
         self.language_combo.current(0)
         self.language_combo.bind("<<ComboboxSelected>>", self.change_language)
         self.language_combo.pack(side="left")
 
-        source_card = ttk.Frame(main, style="Card.TFrame", padding=18)
-        source_card.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+        source_card = ttk.Frame(main, style="Card.TFrame", padding=20)
+        source_card.grid(row=1, column=0, sticky="ew", pady=(0, 16))
         source_card.columnconfigure(0, weight=1)
         self.register_text("source", ttk.Label(source_card, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w")
         self.register_text("chapter_url", ttk.Label(source_card, text="", style="CardTitle.TLabel")).grid(row=1, column=0, sticky="w", pady=(10, 6))
@@ -338,11 +496,11 @@ class MangaGui:
         url_entry.grid(row=2, column=0, sticky="ew")
 
         option_row = ttk.Frame(main, style="App.TFrame")
-        option_row.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+        option_row.grid(row=2, column=0, sticky="ew", pady=(0, 16))
         option_row.columnconfigure(0, weight=1)
         option_row.columnconfigure(1, weight=1)
 
-        scope_card = ttk.Frame(option_row, style="Card.TFrame", padding=18)
+        scope_card = ttk.Frame(option_row, style="Card.TFrame", padding=20)
         scope_card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
         self.register_text("download_scope", ttk.Label(scope_card, text="", style="Muted.TLabel")).pack(anchor="w")
         self.register_text("chapter_count", ttk.Label(scope_card, text="", style="CardTitle.TLabel")).pack(anchor="w", pady=(10, 8))
@@ -351,7 +509,7 @@ class MangaGui:
         for key, value in (("one_chapter", 1), ("five_chapters", 5), ("ten_chapters", 10), ("all_chapters", 0)):
             self.register_text(key, ttk.Radiobutton(scope_choices, text="", value=value, variable=self.chapter_count)).pack(side="left", padx=(0, 12))
 
-        output_card = ttk.Frame(option_row, style="Card.TFrame", padding=18)
+        output_card = ttk.Frame(option_row, style="Card.TFrame", padding=20)
         output_card.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
         self.register_text("output", ttk.Label(output_card, text="", style="Muted.TLabel")).pack(anchor="w")
         self.register_text("archive_options", ttk.Label(output_card, text="", style="CardTitle.TLabel")).pack(anchor="w", pady=(10, 8))
@@ -361,8 +519,8 @@ class MangaGui:
         self.register_text("create_cbz", ttk.Checkbutton(output_options, text="", variable=self.cbz_var)).grid(row=0, column=1, sticky="w")
         self.register_text("redownload", ttk.Checkbutton(output_card, text="", variable=self.overwrite_var)).pack(anchor="w", pady=(8, 0))
 
-        folder_card = ttk.Frame(main, style="Card.TFrame", padding=18)
-        folder_card.grid(row=3, column=0, sticky="ew", pady=(0, 14))
+        folder_card = ttk.Frame(main, style="Card.TFrame", padding=20)
+        folder_card.grid(row=3, column=0, sticky="ew", pady=(0, 16))
         folder_card.columnconfigure(0, weight=1)
         self.register_text("output_folder", ttk.Label(folder_card, text="", style="Muted.TLabel")).grid(row=0, column=0, columnspan=2, sticky="w")
         folder_entry = ttk.Entry(folder_card, textvariable=self.output_var)
@@ -370,7 +528,7 @@ class MangaGui:
         self.register_text("choose_folder", ttk.Button(folder_card, text="", command=self.choose_output)).grid(row=1, column=1, pady=(9, 0))
 
         actions = ttk.Frame(main, style="App.TFrame")
-        actions.grid(row=4, column=0, sticky="ew", pady=(0, 16))
+        actions.grid(row=4, column=0, sticky="ew", pady=(0, 18))
         self.register_text("start", ttk.Button(actions, text="", style="Accent.TButton", command=self.start))
         self.start_button = self.text_widgets["start"]
         self.start_button.pack(side="left")
@@ -380,8 +538,8 @@ class MangaGui:
         self.register_text("delay", ttk.Label(actions, text="", style="Subtitle.TLabel")).pack(side="left", padx=(25, 8))
         ttk.Spinbox(actions, from_=0, to=60, increment=0.5, width=7, textvariable=self.delay_var).pack(side="left")
 
-        progress_card = ttk.Frame(main, style="Card.TFrame", padding=18)
-        progress_card.grid(row=5, column=0, sticky="ew", pady=(0, 14))
+        progress_card = ttk.Frame(main, style="Card.TFrame", padding=20)
+        progress_card.grid(row=5, column=0, sticky="ew", pady=(0, 16))
         progress_card.columnconfigure(0, weight=1)
         ttk.Label(progress_card, textvariable=self.page_progress_text, style="CardText.TLabel").grid(row=0, column=0, sticky="w")
         self.page_progress = ttk.Progressbar(progress_card, mode="determinate", maximum=1, value=0)
@@ -390,8 +548,19 @@ class MangaGui:
         self.overall_progress = ttk.Progressbar(progress_card, mode="determinate", maximum=1, value=0)
         self.overall_progress.grid(row=3, column=0, sticky="ew", pady=(7, 0))
 
-        log_card = ttk.Frame(main, style="Card.TFrame", padding=14)
-        log_card.grid(row=6, column=0, sticky="nsew")
+        history_card = ttk.Frame(main, style="Card.TFrame", padding=14)
+        history_card.grid(row=6, column=0, sticky="ew", pady=(0, 16))
+        history_card.columnconfigure(0, weight=1)
+        self.register_text("history", ttk.Label(history_card, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.history_tree = ttk.Treeview(history_card, columns=("time", "source", "status", "details"), show="headings", height=4)
+        for column, width in (("time", 145), ("source", 360), ("status", 120), ("details", 260)):
+            self.history_tree.heading(column, text=self.text(f"history_{column}"))
+            self.history_tree.column(column, width=width, anchor="w", stretch=column in {"source", "details"})
+        self.history_tree.grid(row=1, column=0, sticky="ew")
+        self.refresh_history()
+
+        log_card = ttk.Frame(main, style="Card.TFrame", padding=16)
+        log_card.grid(row=7, column=0, sticky="nsew")
         log_card.columnconfigure(0, weight=1)
         log_card.rowconfigure(1, weight=1)
         log_header = ttk.Frame(log_card, style="Card.TFrame")
@@ -402,7 +571,7 @@ class MangaGui:
         self.log.grid(row=1, column=0, sticky="nsew")
 
         status = tk.Frame(main, bg=self.colors["bg"])
-        status.grid(row=7, column=0, sticky="ew", pady=(11, 0))
+        status.grid(row=8, column=0, sticky="ew", pady=(11, 0))
         tk.Label(status, text="●", bg=self.colors["bg"], fg=self.colors["green"], font=("Segoe UI", 9)).pack(side="left")
         tk.Label(status, textvariable=self.status_text, bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(6, 0))
         self.register_text("privacy", tk.Label(status, text="", bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 8))).pack(side="right")
@@ -423,6 +592,17 @@ class MangaGui:
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
+
+    def play_completion_sound(self):
+        """Play a short completion sound without blocking the GUI thread."""
+        try:
+            if winsound is not None:
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            else:
+                self.root.bell()
+        except Exception:
+            # Audio notifications must never prevent the completion popup.
+            self.root.bell()
 
     def start(self):
         if self.worker and self.worker.is_alive():
@@ -461,6 +641,7 @@ class MangaGui:
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.write_log(self.text("started", language, url=url))
+        self.add_history(url, output_root, selected_count)
         self.worker = threading.Thread(
             target=self.download_worker,
             args=(url, delay, output_root, selected_count, overwrite, convert_webp, create_cbz_option, language),
@@ -561,18 +742,23 @@ class MangaGui:
                         self.overall_progress_text.set(self.text("overall_all_progress", current=current))
                 elif kind == "done":
                     self.write_log(str(value))
+                    self.update_history(self.text("status_complete"), str(value))
                     self.overall_progress.stop()
                     self.status_text.set(self.text("status_complete"))
                     self.start_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
+                    self.play_completion_sound()
+                    messagebox.showinfo(self.text("download_complete"), str(value))
                 elif kind == "stopped":
                     self.write_log(str(value))
+                    self.update_history(self.text("status_stopped"), str(value))
                     self.overall_progress.stop()
                     self.status_text.set(self.text("status_stopped"))
                     self.start_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
                 elif kind == "error":
                     self.write_log(str(value))
+                    self.update_history(self.text("status_error"), str(value))
                     self.overall_progress.stop()
                     self.status_text.set(self.text("status_error"))
                     self.start_button.configure(state="normal")

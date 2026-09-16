@@ -17,6 +17,8 @@ other access controls.
 - Convert `.webp` pages to `.jpg` while preserving the original WebP files.
 - Create one `.cbz` archive per chapter.
 - Shows per-page and overall chapter progress.
+- Keeps a persistent download history with status and details.
+- Minimizes to the Windows system tray when the window is closed.
 - Includes a command-line interface for scripted downloads.
 
 ## Requirements
@@ -25,6 +27,7 @@ other access controls.
 - `requests`
 - `beautifulsoup4`
 - `Pillow`
+- `pystray`
 
 Install the dependencies:
 
@@ -54,6 +57,18 @@ folder, with the `.cbz` file beside that folder.
 
 The `All chapters` option follows the website's `Next chapter` link until no
 next link is found.
+
+Closing the window hides it in the system tray instead of exiting. Use the tray
+icon menu to show the window again or exit the application. Download history is
+stored locally in `%APPDATA%\MangaDownloader\download_history.json` and keeps
+the latest 100 records.
+
+## Build a standalone Windows executable
+
+Run `build_exe.bat` on Windows. The script installs the project dependencies
+and PyInstaller, then creates `dist\MangaDownloader.exe`. The executable is
+windowed and can run without a separate Python installation. The same build is
+also described by `MangaDownloader.spec` for reproducible PyInstaller builds.
 
 ## Command-line interface
 
