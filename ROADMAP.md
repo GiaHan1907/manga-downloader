@@ -39,6 +39,10 @@ The current branch is `main`. The intended source entry point is `manga_gui.py`;
 
 **Status: In progress / must be revalidated on Windows.**
 
+Checkpoint update: the first Phase 0 review found that `.gitignore` excluded
+`MangaDownloader.spec`, which made clean GitHub clones unable to reproduce the
+icon-enabled PyInstaller build. This was fixed and pushed in commit `bb60f39`.
+
 1. Install dependencies in the intended Windows Python environment.
 2. Remove obsolete `pathlib` backport if PyInstaller reports it.
 3. Close all running MangaDownloader tray/process instances.
