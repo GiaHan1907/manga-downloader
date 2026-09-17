@@ -1,0 +1,37 @@
+name: Regression
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: Composite regression (phases 0-9)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile sources (fast syntax gate)
+        run: python -m py_compile manga_gui.py download_manga.py history_store.py convert_icon.py
+
+      - name: Run composite regression suite
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -u tests/regression_all.py

@@ -45,6 +45,18 @@ First feature-complete release covering ROADMAP phases 0–9.
 ### Changed
 - Line endings normalized repository-wide via `.gitattributes` (LF for text,
   CRLF for Windows scripts, binary handling for icons).
+- Event pump no longer schedules ticks after shutdown (no more `bgerror`
+  noise while the app closes).
+
+### Fixed
+- Tray thread reading Tkinter variables crashed on shutdown.
+- One failing event handler could kill the GUI event pump.
+- Retried tasks duplicated history rows; history selection was lost on
+  refresh; combobox startup crash with empty values; settings/theme rebuild
+  issues found by smoke tests.
+- Queue transfer tracking: `last_bytes` is now recorded per progress event.
+- Archive library rename/delete survive transient Windows sharing locks
+  (antivirus, indexer, image viewers) via bounded filesystem retries.
 
 ### Fixed
 - Tray thread reading Tkinter variables crashed on shutdown.
@@ -57,3 +69,6 @@ First feature-complete release covering ROADMAP phases 0–9.
 - PyInstaller one-file windowed build with bundled PNG/ICO resources,
   `pystray` hidden imports, and Windows version metadata
   (`MangaDownloader.spec`, `version_info.txt`, `build_exe.bat`).
+- Composite regression suite (77 checks, phases 0–9) runs on GitHub Actions
+  (`windows-latest`) on every push; the suite plus a clean-install run of the
+  exe (first-run, legacy migration, tray/exit) verified this release.

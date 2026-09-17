@@ -1,5 +1,7 @@
 # Manga Downloader
 
+[![Regression](https://github.com/GiaHan1907/manga-downloader/actions/workflows/regression.yml/badge.svg)](https://github.com/GiaHan1907/manga-downloader/actions/workflows/regression.yml)
+
 A small Python downloader for publicly accessible manga reader pages. It saves
 chapter images locally, can follow the site's next-chapter links, converts WebP
 pages to JPG, and packages each chapter as a CBZ archive.
@@ -111,6 +113,20 @@ downloads/
 │   └── ...
 └── Manga Title - Chapter 1.cbz
 ```
+
+## Testing
+
+A composite regression suite covers phases 0-9 of the roadmap in one run
+(persistence, queue, pause/retry, SQLite history, transfer speed, archive
+library, settings, toasts). It runs on every push via GitHub Actions on
+`windows-latest` and can be run locally with:
+
+```bat
+python -u tests\regression_all.py
+```
+
+Exit code 0 means all checks passed. The frozen-exe checks skip automatically
+when `dist\MangaDownloader.exe` has not been built.
 
 ## Troubleshooting
 
