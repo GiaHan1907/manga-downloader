@@ -143,7 +143,7 @@ Acceptance: clean standalone EXE build and no orphan process after tray exit.
 
 ### Phase 10 — Long-session reliability and user reach
 
-**Status: In progress — 10.1–10.6 implemented and covered by the regression suite (112 checks).**
+**Status: Complete — 10.1–10.8 implemented and covered by the regression suite (123 checks).**
 
 Rationale: v1.0.0 completed the feature set; the remaining real-world risk is
 sessions that run for hours (a queue of hundreds of chapters) where an
@@ -187,15 +187,20 @@ sees an empty GUI with no hints. Every item below keeps the event-pump rule
    written, an honest download of the same shape completes, and page 1 stays
    intact for resume.
 
-7. **First-run onboarding hints** — empty-state bilingual hints on the queue,
-   history, and library cards ("Add a task with the URL field above", etc.)
-   that disappear once content exists. Acceptance: hints visible on a blank
-   sandbox first run (clean-install scenario) and gone after adding a task.
+7. **First-run onboarding hints** — done: bilingual empty-state hints on the
+   queue and history cards plus the library window's empty state. They hide
+   whenever content exists (queue tasks / history rows / scanned items),
+   re-evaluate on language switches, and refresh when the library closes.
+   Acceptance verified: hints visible on empty state, hidden with content,
+   and re-rendered in Vietnamese after a language switch.
 
-8. **`--url` CLI-to-GUI bridge** — `MangaDownloader.exe --url <chapter-url>`
-   opens the GUI with the URL prefilled (and `--out <path>` optional), reusing
-   the existing single instance from item 1 when present. Acceptance: the
-   flag populates the URL field without starting a download.
+8. **`--url` CLI-to-GUI bridge** — done: `MangaDownloader.exe --url <chapter-url>`
+   opens the GUI with the URL prefilled. When an instance is already running,
+   the second launch forwards the URL through the single-instance show request
+   (flag file payload; always non-empty: "show" = surface only, a URL = prefill
+   and surface) and exits 0 without starting a competing app. Acceptance
+   verified: `main(["--url", ...])` prefills the running app's URL field and
+   surfaces it; a plain second launch sends only "show".
 
 ## Working rules for future AI contributors
 
@@ -211,7 +216,10 @@ sees an empty GUI with no hints. Every item below keeps the event-pump rule
 
 ## Suggested next action
 
-Start with the remaining Phase 10 items in order — the next one is 10.7 (first-run onboarding hints). Verification harness:
+All ten phases are complete. The natural next step is a release: bump
+`APP_VERSION` in `manga_gui.py` and `version_info.txt`, move the Unreleased
+CHANGELOG section under a new version, then tag and push — CI builds,
+regression-tests and attaches the exe automatically. Verification harness:
 
 ```powershell
 python -u tests\regression_all.py

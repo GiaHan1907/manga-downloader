@@ -228,6 +228,9 @@ UI_TEXT = {
         "task_progress_chapters": "{count} chapter(s)",
         "history_transfer": "Pages {pages} · {bytes} · paused {paused} · attempts {attempts}",
         "history_finished_near": "Finished near expected size ({bytes})",
+        "hint_queue": "The queue is empty — set a chapter URL above, then click “+ Add task”.",
+        "hint_history": "No downloads yet — completed tasks will appear here.",
+        "hint_library": "No chapters found in the output folders — download something first, then Scan.",
         "task_progress_bytes": "{chapters} chapter(s) · {bytes} · {speed}",
         "tip_queue_add": "Add the chapter URL above to the queue with the current settings.",
         "tip_queue_start": "Download all queued tasks one by one (or only the selected ones).",
@@ -482,6 +485,9 @@ UI_TEXT = {
         "task_progress_chapters": "{count} chương",
         "history_transfer": "Trang {pages} · {bytes} · tạm dừng {paused} · lần thử {attempts}",
         "history_finished_near": "Hoàn tất gần đúng dung lượng mong đợi ({bytes})",
+        "hint_queue": "Hàng đợi trống — dán URL chương ở khung phía trên rồi bấm “+ Thêm tác vụ”.",
+        "hint_history": "Chưa có lượt tải nào — các tác vụ hoàn thành sẽ hiện ở đây.",
+        "hint_library": "Chưa có chương nào trong thư mục output — hãy tải vài chương rồi bấm Quét lại.",
         "task_progress_bytes": "{chapters} chương · {bytes} · {speed}",
         "tip_queue_add": "Thêm URL chapter ở trên vào hàng đợi với thiết lập hiện tại.",
         "tip_queue_start": "Tải lần lượt các tác vụ đang chờ (hoặc chỉ những dòng đang chọn).",
@@ -610,24 +616,30 @@ class SingleInstanceGuard:
         self.handle = None
         self.is_owner = False
 
-    def request_show(self):
-        """Signal the owning instance to surface its window (best effort)."""
+    def request_show(self, payload: str = "show"):
+        """Signal the owning instance (best effort): show window, optional URL.
+
+        The payload is always non-empty so the owner can tell a real request
+        from a missing file: "show" means surface only, anything else is a
+        URL to prefill (which also surfaces).
+        """
         try:
             show_path = MangaGui._app_data_dir() / "show-instance.flag"
-            show_path.write_text(str(os.getpid()), encoding="utf-8")
+            show_path.write_text(payload or "show", encoding="utf-8")
         except OSError:
             pass
 
-    def is_show_requested(self) -> bool:
-        """Consume the show request written by a second launch."""
+    def is_show_requested(self) -> str:
+        """Consume the second-launch request; returns its payload ('' = none)."""
         show_path = MangaGui._app_data_dir() / "show-instance.flag"
         try:
+            payload = show_path.read_text(encoding="utf-8")
             show_path.unlink()
-            return True
+            return payload
         except FileNotFoundError:
-            return False
+            return ""
         except OSError:
-            return False
+            return ""
 
 
 def install_crash_logging(app: "MangaGui | None", log_tail_size: int = 50):
@@ -943,6 +955,7 @@ class ArchiveWindow(tk.Toplevel):
             self.canvas.unbind_all("<MouseWheel>")
         except tk.TclError:
             pass
+        self.app.update_hints()
         super().destroy()
 
     def _drain_thumbs(self):
@@ -1001,6 +1014,7 @@ class ArchiveWindow(tk.Toplevel):
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self.canvas_window, width=e.width))
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
         self.empty_label = None
+        self.has_root = False  # Phase 10.7: any scanned output root yet?
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
@@ -1038,6 +1052,7 @@ class ArchiveWindow(tk.Toplevel):
                 roots.add(output_value)
         scanned = self.archive.scan(list(roots))
         self.items = [scanned[key] for key in sorted(scanned, key=lambda name: natural_key(Path(name)))]
+        self.has_root = bool(roots)
 
     def refresh_items(self):
         app = self.app
@@ -1063,11 +1078,9 @@ class ArchiveWindow(tk.Toplevel):
         for child in self.items_frame.winfo_children():
             child.destroy()
         self._thumbs = []
-        if self.empty_label is not None:
-            self.empty_label.destroy()
-            self.empty_label = None
+        self.empty_label = None
         if not self.filtered:
-            self.empty_label = ttk.Label(self.items_frame, text=app.text("library_empty"), style="Muted.TLabel", wraplength=520)
+            self.empty_label = ttk.Label(self.items_frame, text=app.text("hint_library"), style="Muted.TLabel", wraplength=520)
             self.empty_label.pack(anchor="w", pady=24)
             return
         if self.view_mode == "grid":
@@ -1453,6 +1466,20 @@ class MangaGui:
         except OSError:
             pass
 
+    def update_hints(self):
+        """Phase 10.7: first-run hints shown while a section has no content."""
+        if self.closing:
+            return
+        try:
+            if hasattr(self, "hint_queue"):
+                self.hint_queue.configure(
+                    text="" if self.queue_tasks else self.text("hint_queue"))
+            if hasattr(self, "hint_history"):
+                self.hint_history.configure(
+                    text="" if self.history.count() else self.text("hint_history"))
+        except tk.TclError:
+            pass  # widgets gone during shutdown
+
     def record_transfer_event(self, task):
         """Phase 10.5: persist the attempt's transfer totals as a history event.
 
@@ -1637,11 +1664,15 @@ class MangaGui:
         self.root.title(self.text("window_title") + f"  ·  v{APP_VERSION}")
 
     def _poll_show_requests(self):
-        """Phase 10.1: surface the window when a second launch asks."""
+        """Phase 10.1/10.8: surface the window; prefill a second launch's URL."""
         if self.closing:
             return
-        if self.guard is not None and self.guard.is_show_requested():
-            self._show_window()
+        if self.guard is not None:
+            payload = self.guard.is_show_requested()
+            if payload and payload != "show":
+                self.url_var.set(payload)
+            if payload:
+                self._show_window()
         self._poll_after_id = self.root.after(300, self._poll_show_requests)
 
     def log_history(self) -> list[str]:
@@ -1793,6 +1824,7 @@ class MangaGui:
                 self.history_tree.selection_set(restored[0])
         if hasattr(self, "history_count_label"):
             self.history_count_label.configure(text=self.text("history_records", count=len(records)))
+        self.update_hints()
 
     # ---------- history record actions (Phase 4) ----------
 
@@ -1963,6 +1995,7 @@ class MangaGui:
 
     def refresh_queue_tree(self):
         self.update_queue_progress()
+        self.update_hints()
         if not hasattr(self, "queue_tree"):
             return
         tree = self.queue_tree
@@ -2242,6 +2275,9 @@ class MangaGui:
         self._sync_settings_choices()
         if hasattr(self, "queue_progress_label"):
             self.update_queue_progress()
+        # Registered hint labels got the raw template above; re-evaluate them
+        # against the actual content state.
+        self.update_hints()
         if getattr(self, "library_window", None) is not None and self.library_window.winfo_exists():
             self.library_window.relocalize()
         if hasattr(self, "history_events_tree"):
@@ -2504,8 +2540,11 @@ class MangaGui:
             self.history_tree.column(column, width=width, anchor="w", stretch=column in {"source", "details"})
         self.history_tree.grid(row=2, column=0, sticky="ew")
         self.history_tree.bind("<<TreeviewSelect>>", self.on_history_select)
+        self.hint_history = self.register_text("hint_history", ttk.Label(history_card, text="", style="Muted.TLabel", wraplength=640, justify="left"))
+        self.hint_history.grid(row=3, column=0, sticky="w", pady=(6, 0))
         self._sync_history_combobox_values()
         self.refresh_history()
+        self.update_hints()
 
         queue_card = ttk.Frame(main, style="Card.TFrame", padding=14)
         queue_card.grid(row=6, column=0, sticky="ew", pady=(0, 16))
@@ -2548,6 +2587,8 @@ class MangaGui:
         self.register_text("task_log_title", ttk.Label(queue_card, text="", style="Muted.TLabel")).grid(row=5, column=0, sticky="w", pady=(10, 4))
         self.task_log = ScrolledText(queue_card, height=5, state="disabled", wrap="word", bg=self.colors["input"], fg="#b9c6d4", insertbackground=self.colors["text"], selectbackground="#264f78", relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
         self.task_log.grid(row=6, column=0, sticky="ew")
+        self.hint_queue = self.register_text("hint_queue", ttk.Label(queue_card, text="", style="Muted.TLabel", wraplength=640, justify="left"))
+        self.hint_queue.grid(row=7, column=0, sticky="w", pady=(6, 0))
         self.refresh_task_log()
 
         log_card = ttk.Frame(main, style="Card.TFrame", padding=16)
@@ -3290,14 +3331,20 @@ APP_VERSION = "1.0.0"
 
 
 def main(argv=None):
-    argv = sys.argv[1:] if argv is None else argv
+    argv = list(sys.argv[1:] if argv is None else argv)
     if "--version" in argv:
         print(f"MangaDownloader {APP_VERSION}")
         return 0
+    # Phase 10.8: `--url <chapter-url>` bridges a CLI call into the GUI.
+    url = ""
+    if "--url" in argv:
+        idx = argv.index("--url")
+        if idx + 1 < len(argv):
+            url = argv[idx + 1].strip()
     # Phase 10.1: one app at a time over the shared data files.
     guard = SingleInstanceGuard()
     if not guard.is_owner:
-        guard.request_show()
+        guard.request_show(url)
         return 0
 
     root = tk.Tk()

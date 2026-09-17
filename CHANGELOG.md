@@ -33,6 +33,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `Content-Length`, a short response body raises `TruncatedImageError` before
   the file is written, so truncated images never enter chapter folders or CBZ
   archives and retries refetch them via the existing skip-existing resume.
+- Phase 10.7 — First-run onboarding hints: bilingual empty-state hints on the
+  queue and history cards and in the library window's empty state, hidden
+  whenever content exists and re-evaluated on language switches.
+- Phase 10.8 — `--url` CLI-to-GUI bridge: `--url <chapter-url>` opens the GUI
+  with the field prefilled; when an instance is already running, the second
+  launch forwards the URL through the single-instance show request (flag
+  payload "show" = surface only, a URL = prefill and surface) and exits 0.
 - Fixed a latent bug surfaced while testing 10.4: `QueueTask.from_dict`
   returned before restoring `total_bytes`/`bank_bytes`, so persisted byte
   totals were silently dropped on reload; the bytes now also survive app

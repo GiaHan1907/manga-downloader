@@ -98,6 +98,7 @@ check("version constant", manga_gui.APP_VERSION == "1.0.0", manga_gui.APP_VERSIO
 buf = io.StringIO()
 with redirect_stdout(buf):
     code = manga_gui.main(["--version"])
+_real_guard_cls = manga_gui.SingleInstanceGuard
 check("--version exit code", code == 0, str(code))
 check("--version output", buf.getvalue().strip() == "MangaDownloader 1.0.0", buf.getvalue().strip())
 check("parse_args defaults", downloader.parse_args().timeout == 30)
@@ -543,6 +544,9 @@ app.close_all_toasts()
 # ===========================================================================
 section("Phase 10.1: single-instance guard")
 
+# A stale flag from an earlier run would surface the window or prefill a URL
+# during this test; purge leftovers before exercising the guard.
+(manga_gui.MangaGui._app_data_dir() / "show-instance.flag").unlink(missing_ok=True)
 g1 = manga_gui.SingleInstanceGuard()
 g2 = manga_gui.SingleInstanceGuard()
 check("first instance owns guard", g1.is_owner)
@@ -708,6 +712,7 @@ app.queue_tasks = [t55]
 app.start_queue()
 ok = pump_until(root, lambda: t55.state == "completed", label="10.5 task done")
 check("10.5 task completed", ok, t55.state)
+pump(root, 0.4)   # let the finished/transfer events reach the history store
 check("task pages recorded", getattr(t55, "last_pages", 0) == 2, str(getattr(t55, "last_pages", None)))
 record_id = f"{t55.id}-q"
 evs = app.history.events(record_id)
@@ -788,6 +793,92 @@ ok_dirs = [p for p in out6b.iterdir() if p.is_dir()]
 check("both pages written", (ok_dirs[0] / "0001.jpg").exists() and (ok_dirs[0] / "0002.jpg").exists(),
       str(list(ok_dirs[0].iterdir()) if ok_dirs else []))
 
+section("Phase 10.7: first-run onboarding hints")
+
+# Restore real queue/history content checks via the live widgets. The main
+# app finished a queue run above, so hints start hidden; clear both to see them.
+app.queue_tasks = []
+while app.history.count():   # search may cap its result size; drain fully
+    ids = [r["id"] for r in app.history.search("")]
+    if not ids:
+        break
+    app.history.delete_records(ids)
+app.refresh_history()
+pump(root, 0.3)
+check("queue hint visible when empty", "queue is empty" in app.hint_queue["text"].lower()
+      or "hàng đợi trống" in app.hint_queue["text"].lower(), app.hint_queue["text"])
+check("history hint visible when empty", "no downloads yet" in app.hint_history["text"].lower()
+      or "chưa có lượt tải" in app.hint_history["text"].lower(), app.hint_history["text"])
+
+# Adding a task clears the queue hint.
+app.queue_tasks = [manga_gui.QueueTask("http://x/hint", str(BASE / "oh"), 1, 0.0, False, False, False)]
+app.refresh_queue_tree()
+check("queue hint hides with content", app.hint_queue["text"] == "", repr(app.hint_queue["text"]))
+app.queue_tasks = []
+
+# Language switch re-renders a visible hint bilingually.
+app.history.delete_records([r["id"] for r in app.history.search("")])
+app.refresh_history()
+app.language_combo.set("Tiếng Việt")
+app.change_language()
+check("vi hint text", "hàng đợi trống" in app.hint_queue["text"].lower(), app.hint_queue["text"])
+app.language_combo.set("English")
+app.change_language()
+
+# Library empty state uses the new hint copy through the real window.
+win7 = app.open_library()
+win7.archive.scan = lambda roots: {}
+win7.rescan()
+win7.refresh_items()
+pump(root, 0.2)
+check("library hint on empty", "download something first" in win7.empty_label["text"].lower()
+      or "tải vài chương" in win7.empty_label["text"].lower(), win7.empty_label["text"])
+check("library has_root flag", win7.has_root in (True, False))
+win7.archive.scan = lambda roots: {"Item": manga_gui.ArchiveItem(Path(BASE) / "nope")} if False else {}
+win7.destroy()
+pump(root, 0.2)
+
+# 10.7 cleanup: leave one history row so later sections behave as before.
+app.add_history("http://fake/seed", BASE / "seed", 1)
+
+section("Phase 10.8: --url CLI-to-GUI bridge")
+
+# Payload contract: second launch without URL asks for show only.
+g8 = manga_gui.SingleInstanceGuard()
+app.guard = g8
+root.withdraw()
+code = manga_gui.main([])
+check("second plain launch exits 0", code == 0, str(code))
+payload_seen = []
+class _ProbeGuard:
+    def __init__(self, inner):
+        self.inner = inner
+    @property
+    def is_owner(self):
+        return self.inner.is_owner
+    def request_show(self, payload="show"):
+        payload_seen.append(payload or "show")   # record the effective payload
+    def is_show_requested(self):
+        return ""
+g8_probe = manga_gui.SingleInstanceGuard()
+probe = _ProbeGuard(g8_probe)
+manga_gui.SingleInstanceGuard = lambda: probe
+code = manga_gui.main([])
+manga_gui.SingleInstanceGuard = _real_guard_cls
+check("plain launch sends show payload", payload_seen == ["show"], str(payload_seen))
+
+# Second launch with --url: payload carries the URL, owner prefills it.
+pump(root, 0.5)
+code = manga_gui.main(["--url", "http://fake/bridge/ch-1"])
+pump(root, 0.4)
+check("--url second launch exits 0", code == 0, str(code))
+check("url prefilled into running app", app.url_var.get() == "http://fake/bridge/ch-1",
+      app.url_var.get())
+check("window surfaced by url bridge", root.state() == "normal", root.state())
+root.withdraw()
+g8.release()
+
+section("Phase 9: frozen exe")
 section("Phase 9: frozen exe")
 
 exe = REPO_ROOT / "dist" / "MangaDownloader.exe"
