@@ -135,14 +135,36 @@ def extract_images(html: str, page_url: str) -> list[str]:
     return urls
 
 
-def page_title(html: str, url: str) -> str:
+def page_title(html: str, url: str, naming: str = "") -> str:
+    """Resolve the output folder name for a chapter.
+
+    ``naming`` enables optional cleanup steps: "site" strips the site name
+    from the chapter title, "slug" keeps only letters/digits/dashes, "full"
+    enables both.
+    """
     soup = BeautifulSoup(html, "html.parser")
+    title = ""
     for selector in ("h1", ".entry-title", ".c-breadcrumb-wrapper h1", "title"):
         node = soup.select_one(selector)
         if node and node.get_text(" ", strip=True):
-            return clean_name(node.get_text(" ", strip=True), "chapter")
-    slug = urlparse(url).path.rstrip("/").split("/")[-1]
-    return clean_name(slug, "chapter")
+            title = clean_name(node.get_text(" ", strip=True), "chapter")
+            break
+    if not title:
+        title = clean_name(urlparse(url).path.rstrip("/").split("/")[-1], "chapter")
+    flags = {part.strip().lower() for part in naming.split(",") if part.strip()}
+    if "full" in flags:
+        flags.update(("site", "slug"))
+    if "site" in flags:
+        hostname = (urlparse(url).hostname or "").rsplit(".", 2)
+        site = hostname[-2] if len(hostname) >= 2 else ""
+        if site and site.lower() in title.lower():
+            # Remove the site name (case-insensitive) and tidy separators left over.
+            pattern = re.compile(re.escape(site), re.IGNORECASE)
+            title = clean_name(pattern.sub(" ", title), "chapter")
+            title = re.sub(r"^[\s\-–·|]+", "", title).strip()
+    if "slug" in flags:
+        title = re.sub(r"[^\w\- ]", "", title, flags=re.UNICODE).strip(" -") or "chapter"
+    return title
 
 
 def next_chapter(html: str, current_url: str) -> str | None:
@@ -184,12 +206,22 @@ def download_chapter(
     overwrite: bool,
     cancel_event: Event | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    bytes_callback: Callable[[int, int, float], None] | None = None,
+    pause_event: Event | None = None,
+    naming: str = "",
 ) -> tuple[str, int]:
+    """Download one chapter's pages.
+
+    ``cancel_event`` stops the download cleanly. ``pause_event`` suspends the
+    loop between page requests (already saved files are skipped on resume).
+    ``bytes_callback(received_bytes, total_bytes, kbps)`` reports progress in
+    bytes and the current download speed in kilobytes per second.
+    """
     if cancel_event and cancel_event.is_set():
         raise DownloadCancelled("Stopped by user request.")
     response = session.get(chapter_url, timeout=timeout)
     response.raise_for_status()
-    title = page_title(response.text, chapter_url)
+    title = page_title(response.text, chapter_url, naming)
     chapter_dir = output_root / title
     chapter_dir.mkdir(parents=True, exist_ok=True)
     image_urls = extract_images(response.text, response.url)
@@ -197,12 +229,22 @@ def download_chapter(
         raise RuntimeError("No chapter page images were found in the HTML.")
     if progress_callback:
         progress_callback(title, 0, len(image_urls))
+    if bytes_callback:
+        bytes_callback(0, 0, 0.0)
 
     print(f"{title}: found {len(image_urls)} images")
     downloaded = 0
+    speed_samples: list[tuple[float, int]] = []  # (timestamp, received bytes)
+    paused_seconds = 0.0
     for index, image_url in enumerate(image_urls, start=1):
         if cancel_event and cancel_event.is_set():
             raise DownloadCancelled("Stopped by user request.")
+        if pause_event is not None:
+            # Sleep while paused; wake immediately for stop or resume.
+            while pause_event.is_set() and not (cancel_event and cancel_event.is_set()):
+                before = time.monotonic()
+                pause_event.wait(0.2)
+                paused_seconds += time.monotonic() - before
         # Page extension is discovered after the response, so a temporary path
         # is not needed: use the common jpg name first and preserve existing files.
         existing = next((chapter_dir / f"{index:04d}{ext}" for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif") if (chapter_dir / f"{index:04d}{ext}").exists()), None)
@@ -231,9 +273,16 @@ def download_chapter(
         target.write_bytes(image_response.content)
         downloaded += 1
         print(f"  [{index}/{len(image_urls)}] {target.name}")
+        if bytes_callback:
+            now = time.monotonic()
+            speed_samples.append((now, speed_samples[-1][1] + len(image_response.content) if speed_samples else len(image_response.content)))
+            speed_samples[:] = [sample for sample in speed_samples if now - sample[0] <= 10.0]
+            window_seconds = max(now - speed_samples[0][0], 1e-6)
+            kbps = (speed_samples[-1][1] - speed_samples[0][1]) / 1024 / window_seconds
+            bytes_callback(speed_samples[-1][1], 0, kbps)
         if progress_callback:
             progress_callback(title, index, len(image_urls))
-    return title, len(image_urls)
+    return title, len(image_urls), downloaded, paused_seconds
 
 
 def parse_args() -> argparse.Namespace:
@@ -272,7 +321,7 @@ def main() -> int:
             break
         visited.add(url)
         try:
-            title, _ = download_chapter(session, url, output_root, args.delay, args.timeout, args.overwrite)
+            title, _, _, _ = download_chapter(session, url, output_root, args.delay, args.timeout, args.overwrite)
             chapters += 1
             print(f"Processed: {title}")
             if not args.follow_next:
