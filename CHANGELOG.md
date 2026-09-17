@@ -15,6 +15,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `threading.excepthook` write `crash-*.crash.log` (traceback, version,
   activity-log tail) into AppData and a non-modal toast surfaces the error;
   fatal errors no longer vanish silently.
+- Phase 10.3 — Data-file self-checks and recovery: `history.db` is validated
+  with a SQLite integrity check + schema probe and `queue.json` with a schema
+  probe on startup; damaged files are quarantined as `.corrupt` and rebuilt
+  from timestamped `.bak` snapshots (history via `VACUUM INTO`, queue after
+  every save, newest 3 kept).
+- Phase 10.4 — Queue-level progress: the queue card gains an aggregate header
+  (`task i/N · completed/failed · bytes`) and a thick progress bar computed on
+  the main thread; byte totals are banked on final task states, persist in
+  `queue.json`, and re-queued tasks stop contributing (no double counting).
+- Fixed a latent bug surfaced while testing 10.4: `QueueTask.from_dict`
+  returned before restoring `total_bytes`/`bank_bytes`, so persisted byte
+  totals were silently dropped on reload; the bytes now also survive app
+  restarts. `_exit_application` additionally cancels the single-instance poll
+  tick, removing a `bgerror` at shutdown.
 
 ## [1.0.0] — 2026-09-16
 

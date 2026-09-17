@@ -171,6 +171,9 @@ UI_TEXT = {
         "toast_download_stopped_body": "The download was stopped by user request.",
         "toast_crash_title": "Unexpected error",
         "toast_crash_body": "A fatal error occurred: {error}. Details were written to the crash log.",
+        "queue_progress": "Task {done}/{total} · {completed} completed · {failed} failed · {bytes}",
+        "queue_progress_title": "Queue progress",
+        "queue_progress_idle": "Queue idle",
         "settings_output": "Current output folder",
         "open_folder": "Open folder",
         "open_folder_action": "Open folder",
@@ -420,6 +423,9 @@ UI_TEXT = {
         "toast_download_stopped_body": "Tải xuống đã được dừng theo yêu cầu.",
         "toast_crash_title": "Lỗi bất thường",
         "toast_crash_body": "Đã xảy ra lỗi nghiêm trọng: {error}. Chi tiết đã được ghi vào tệp crash log.",
+        "queue_progress": "Tác vụ {done}/{total} · {completed} hoàn tất · {failed} thất bại · {bytes}",
+        "queue_progress_title": "Tiến độ hàng đợi",
+        "queue_progress_idle": "Hàng đợi đang trống",
         "settings_output": "Thư mục lưu hiện tại",
         "open_folder": "Mở thư mục",
         "open_folder_action": "Mở thư mục",
@@ -704,6 +710,8 @@ class QueueTask:
         self.log_lines: list[str] = []
         self.last_chapters = 0
         self.last_bytes = 0  # bytes received in this run (speed window)
+        self.total_bytes = 0  # bytes received across the whole task (phase 10.4)
+        self.bank_bytes = 0  # bytes banked when the task reached a final state (10.4)
 
     def to_dict(self) -> dict:
         return {
@@ -718,11 +726,13 @@ class QueueTask:
             "state": self.state,
             "progress": self.progress,
             "attempts": self.attempts,
+            "total_bytes": getattr(self, "total_bytes", 0),
+            "bank_bytes": getattr(self, "bank_bytes", 0),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "QueueTask":
-        return cls(
+        task = cls(
             str(data.get("url", "")),
             str(data.get("output", "")),
             int(data.get("chapter_count", 1)),
@@ -735,6 +745,9 @@ class QueueTask:
             progress=str(data.get("progress", "")),
             attempts=int(data.get("attempts", 0)),
         )
+        task.total_bytes = int(data.get("total_bytes", 0) or 0)
+        task.bank_bytes = int(data.get("bank_bytes", 0) or 0)
+        return task
 
 
 class Tooltip:
@@ -1344,6 +1357,7 @@ class MangaGui:
         self.transfer_stable_rate = None
         self.eta_pages_done = 0
         self.eta_pages_total = 0
+        # Phase 10.4: running totals for the whole queue.
 
         self.setup_theme()
         self.build_ui()
@@ -1354,6 +1368,8 @@ class MangaGui:
         install_crash_logging(self)
         # Phase 10.1: watch for show requests from a second launch.
         self.root.after(300, self._poll_show_requests)
+        # Phase 10.4: seed the aggregate queue progress header.
+        self.update_queue_progress()
 
     @staticmethod
     def _app_data_dir() -> Path:
@@ -1376,12 +1392,30 @@ class MangaGui:
         return cls._app_data_dir() / "settings.json"
 
     def load_queue(self):
+        """Load queue.json; Phase 10.3 recovers from a backup on corruption."""
         try:
             data = json.loads(self.queue_file.read_text(encoding="utf-8"))
-            tasks = data.get("tasks", []) if isinstance(data, dict) else []
-            self.queue_tasks = [QueueTask.from_dict(item) for item in tasks if isinstance(item, dict)]
-        except (OSError, ValueError, TypeError):
+            if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
+                raise ValueError("queue.json schema mismatch")
+            self.queue_tasks = [QueueTask.from_dict(item) for item in data["tasks"]
+                                if isinstance(item, dict)]
+        except (OSError, ValueError, TypeError, AttributeError):
+            # Keep the damaged file for inspection, restore the newest .bak.
+            try:
+                if self.queue_file.exists():
+                    self.queue_file.replace(self.queue_file.with_suffix(".json.corrupt"))
+            except OSError:
+                pass
             self.queue_tasks = []
+            try:
+                backups = sorted(self.queue_file.parent.glob(self.queue_file.name + ".*.bak"))
+                if backups:
+                    shutil.copy2(backups[-1], self.queue_file)
+                    data = json.loads(self.queue_file.read_text(encoding="utf-8"))
+                    self.queue_tasks = [QueueTask.from_dict(item) for item in data.get("tasks", [])
+                                        if isinstance(item, dict)]
+            except (OSError, ValueError, TypeError, AttributeError):
+                self.queue_tasks = []
         # Crash recovery: a task left "active" by a previous session goes back to the queue.
         for task in self.queue_tasks:
             if task.state == "active":
@@ -1394,11 +1428,46 @@ class MangaGui:
         try:
             temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temp, self.queue_file)
+            self._backup_queue()
         except OSError:
             try:
                 temp.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _backup_queue(self):
+        """Phase 10.3: timestamped queue.json backup; keep the newest 3."""
+        try:
+            stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+            shutil.copy2(self.queue_file, self.queue_file.with_name(self.queue_file.name + f".{stamp}.bak"))
+            for old in sorted(self.queue_file.parent.glob(self.queue_file.name + ".*.bak"))[:-3]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def update_queue_progress(self):
+        """Phase 10.4: aggregate queue progress (main thread, no new state)."""
+        total = len(self.queue_tasks)
+        if hasattr(self, "queue_progress_label"):
+            if not total:
+                self.queue_progress_label.configure(text=self.text("queue_progress_idle"))
+            else:
+                states = [task.state for task in self.queue_tasks]
+                done = sum(1 for s in states if s in {"completed", "failed", "stopped"})
+                self.queue_progress_label.configure(text=self.text(
+                    "queue_progress", done=done, total=total,
+                    completed=states.count("completed"), failed=states.count("failed"),
+                    bytes=self.format_bytes(self.queue_bytes_done())))
+        if hasattr(self, "queue_progress"):
+            self.queue_progress.configure(maximum=total or 1, value=done if total else 0)
+
+    def queue_bytes_done(self) -> int:
+        """Bytes banked by finalized tasks plus the live partial of the active task."""
+        done = sum(getattr(task, "bank_bytes", 0) for task in self.queue_tasks)
+        active = self.active_task
+        if active is not None and active.state not in {"completed", "failed", "stopped"}:
+            done += getattr(active, "total_bytes", 0)
+        return done
 
     def text(self, key: str, language: str | None = None, **values) -> str:
         if language is None:
@@ -1546,7 +1615,7 @@ class MangaGui:
             return
         if self.guard is not None and self.guard.is_show_requested():
             self._show_window()
-        self.root.after(300, self._poll_show_requests)
+        self._poll_after_id = self.root.after(300, self._poll_show_requests)
 
     def log_history(self) -> list[str]:
         """Return up to 200 recent activity log lines (crash log tail)."""
@@ -1586,6 +1655,13 @@ class MangaGui:
                 self.root.after_cancel(pending_tick)
             except Exception:
                 pass
+        # Phase 10.1: cancel the guard poll tick too, same reasoning.
+        poll_tick = getattr(self, "_poll_after_id", None)
+        if poll_tick:
+            try:
+                self.root.after_cancel(poll_tick)
+            except Exception:
+                pass
         self.close_all_toasts()
         if self.tray_icon is not None:
             self.tray_icon.stop()
@@ -1615,6 +1691,7 @@ class MangaGui:
             return
         self.history.update_record(self.current_history_id, status=status, details=details)
         self.history.add_event(self.current_history_id, "finished", details)
+        self.history.backup()
         self.refresh_history()
 
     def update_history_for_task(self, task: QueueTask):
@@ -1638,6 +1715,7 @@ class MangaGui:
             }
         )
         self.history.add_event(record_id, "finished", details)
+        self.history.backup()
         self.refresh_history()
 
     # History status labels written by older versions; a filter must match
@@ -1856,6 +1934,7 @@ class MangaGui:
         return self.text(self._state_key(task.state))
 
     def refresh_queue_tree(self):
+        self.update_queue_progress()
         if not hasattr(self, "queue_tree"):
             return
         tree = self.queue_tree
@@ -2132,6 +2211,8 @@ class MangaGui:
         if hasattr(self, "history_filter_combo"):
             self._sync_history_combobox_values()
         self._sync_settings_choices()
+        if hasattr(self, "queue_progress_label"):
+            self.update_queue_progress()
         if getattr(self, "library_window", None) is not None and self.library_window.winfo_exists():
             self.library_window.relocalize()
         if hasattr(self, "history_events_tree"):
@@ -2210,6 +2291,7 @@ class MangaGui:
         style.configure("TRadiobutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
         style.map("TRadiobutton", background=[("active", self.colors["card"])], foreground=[("disabled", "#687586")])
         style.configure("Horizontal.TProgressbar", troughcolor="#1a2534", background=self.colors["accent"], bordercolor="#1a2534", lightcolor=self.colors["accent"], darkcolor=self.colors["accent"], thickness=9)
+        style.configure("Big.Horizontal.TProgressbar", troughcolor="#1a2534", background=self.colors["accent"], bordercolor="#1a2534", lightcolor=self.colors["accent"], darkcolor=self.colors["accent"], thickness=14)
 
     def build_ui(self):
         shell = ttk.Frame(self.root, style="App.TFrame")
@@ -2426,12 +2508,17 @@ class MangaGui:
         for column, width in (("state", 110), ("source", 340), ("progress", 150), ("output", 240)):
             self.queue_tree.heading(column, text=self.text(f"queue_col_{column}"))
             self.queue_tree.column(column, width=width, anchor="w", stretch=column in {"source", "output"})
-        self.queue_tree.grid(row=2, column=0, sticky="ew")
+        self.queue_progress_label = ttk.Label(queue_card, text="", style="Muted.TLabel")
+        self.queue_progress_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.queue_progress = ttk.Progressbar(queue_card, style="Big.Horizontal.TProgressbar", maximum=1, value=0)
+        Tooltip(self.queue_progress, lambda: self.text("queue_progress_title"))
+        self.queue_progress.grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        self.queue_tree.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         self.queue_tree.bind("<<TreeviewSelect>>", self.on_queue_select)
         self.refresh_queue_tree()
-        self.register_text("task_log_title", ttk.Label(queue_card, text="", style="Muted.TLabel")).grid(row=3, column=0, sticky="w", pady=(10, 4))
+        self.register_text("task_log_title", ttk.Label(queue_card, text="", style="Muted.TLabel")).grid(row=5, column=0, sticky="w", pady=(10, 4))
         self.task_log = ScrolledText(queue_card, height=5, state="disabled", wrap="word", bg=self.colors["input"], fg="#b9c6d4", insertbackground=self.colors["text"], selectbackground="#264f78", relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
-        self.task_log.grid(row=4, column=0, sticky="ew")
+        self.task_log.grid(row=6, column=0, sticky="ew")
         self.refresh_task_log()
 
         log_card = ttk.Frame(main, style="Card.TFrame", padding=16)
@@ -3001,6 +3088,9 @@ class MangaGui:
                 elif kind == "active_task":
                     self.active_task = value
                     self.reset_transfer_stats()
+                    value.total_bytes = 0
+                    value.bank_bytes = 0
+                    self.update_queue_progress()
                     self.refresh_task_log()
                 elif kind == "bytes_progress":
                     received, kbps, page_current, page_total, chapter = value
@@ -3014,6 +3104,8 @@ class MangaGui:
                     active = self.active_task
                     if active is not None:
                         active.last_bytes = received
+                        active.total_bytes = self.transfer_bytes
+                        self.update_queue_progress()
                     if active is not None and hasattr(self, "queue_tree"):
                         active.progress = self.text(
                             "task_progress_bytes",
@@ -3042,6 +3134,8 @@ class MangaGui:
                         self.refresh_task_log()
                 elif kind == "queue_state":
                     task, details = value
+                    if task.state in {"completed", "failed", "stopped"}:
+                        task.bank_bytes = int(getattr(task, "total_bytes", 0) or 0)
                     self.save_queue()
                     self.refresh_queue_tree()
                     self.write_log(self.text("task_state_changed", state=self.queue_state_text(task), url=task.url, details=details))

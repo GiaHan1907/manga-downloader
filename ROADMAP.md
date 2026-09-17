@@ -143,7 +143,7 @@ Acceptance: clean standalone EXE build and no orphan process after tray exit.
 
 ### Phase 10 — Long-session reliability and user reach
 
-**Status: In progress — 10.1 and 10.2 implemented and covered by the regression suite (88 checks).**
+**Status: In progress — 10.1–10.4 implemented and covered by the regression suite (102 checks).**
 
 Rationale: v1.0.0 completed the feature set; the remaining real-world risk is
 sessions that run for hours (a queue of hundreds of chapters) where an
@@ -156,16 +156,20 @@ sees an empty GUI with no hints. Every item below keeps the event-pump rule
 
 2. **Crash log and fatal-error toast** — done: `install_crash_logging` replaces `sys.excepthook` and `threading.excepthook`, writing `crash-YYYYMMDD-HHMMSS.crash.log` (traceback, APP_VERSION, activity-log tail) into AppData and pushing a `crash_report` event so the pump shows a non-modal fatal toast; the hook falls back to the default behavior when the app is absent or closing. Acceptance verified: injected main-thread and thread exceptions both produce a readable log, a toast, and a logged crash line.
 
-3. **Data-file self-checks** — on startup, validate `history.db` (SQLite
-   integrity check) and `queue.json` (schema probe); on failure, keep the
-   damaged file as `.corrupt` and rebuild from `.bak` copies written after
-   every successful save. Acceptance: suite corrupts both files and the app
-   still boots with empty-but-working stores plus the backup restored.
+3. **Data-file self-checks** — done: on startup `HistoryStore` runs a SQLite
+   `PRAGMA integrity_check` plus a schema probe and the app probes `queue.json`;
+   a damaged file is kept as `.corrupt` and the newest timestamped `.bak`
+   (history via `VACUUM INTO`, queue via `shutil.copy2` after every save) is
+   restored in its place. Acceptance verified: the suite corrupts both files
+   and the app recovers the backup with the damaged file quarantined.
 
-4. **Queue-level progress** — a `task i/N · M completed · total bytes` header
-   line and overall progress bar on the queue card, computed on the main
-   thread from task states (no new worker state). Acceptance: values update
-   live while the suite's fake downloader runs.
+4. **Queue-level progress** — done: `update_queue_progress()` (main thread,
+   no new worker state) maintains a `task i/N · M completed · F failed · bytes`
+   header and a thick progress bar on the queue card; byte totals are banked
+   per task on final states (`bank_bytes`), survive queue persistence, and are
+   retried cleanly because a task re-entering the queue stops contributing.
+   Acceptance verified: the suite drives the real pump handler and asserts the
+   header text, bar value, empty/full states, and a save/reload round-trip.
 
 5. **Richer history events** — persist per-task totals the worker already
    computes but only partially records: pages downloaded, bytes, paused
@@ -202,7 +206,7 @@ sees an empty GUI with no hints. Every item below keeps the event-pump rule
 
 ## Suggested next action
 
-Start with the remaining Phase 10 items in order — the next one is 10.3 (data-file self-checks). Verification harness:
+Start with the remaining Phase 10 items in order — the next one is 10.5 (richer history events). Verification harness:
 
 ```powershell
 python -u tests\regression_all.py

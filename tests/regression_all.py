@@ -590,6 +590,113 @@ check("thread crash logged",
       any("suite-thread-fatal-7" in p.read_text(encoding="utf-8") for p in BASE.glob("crash-*.crash.log")))
 app.close_all_toasts()
 
+section("Phase 10.3: data self-checks + backup recovery")
+
+from history_store import HistoryStore
+
+store_dir = BASE / "103-store"
+store_dir.mkdir(exist_ok=True)
+db = store_dir / "history.db"
+
+# Valid store first (for its .bak), then damage it.
+store = HistoryStore(db)
+store.add_record({"id": "a1", "time": "t", "source": "s", "output": "o",
+                  "status": "Completed", "details": "", "url": "u", "chapters": 3})
+store.backup()
+check("history .bak created", any(store_dir.glob("history.db.*.bak")))
+store.close()
+
+# Damage the live db, reopen -> .corrupt quarantine + .bak restored.
+db.write_bytes(b"garbage garbage garbage")
+store2 = HistoryStore(db)
+check("corrupt db quarantined", (store_dir / "history.db.corrupt").exists())
+check("record survived via backup", store2.count() == 1, str(store2.count()))
+store2.close()
+
+# Queue: corrupt queue.json -> .corrupt quarantine + newest .bak restored.
+qdir = BASE / "103-queue"
+qdir.mkdir(exist_ok=True)
+qapp = manga_gui.MangaGui(root)
+qapp.queue_file = qdir / "queue.json"
+qapp.queue_file.write_text("not json", encoding="utf-8")
+qapp.queue_file.with_name("queue.json.0000000000000000.bak").write_text(
+    json.dumps({"tasks": [{"id": "rb1", "url": "http://x/1", "output": str(qdir),
+                           "state": "queued", "progress": "", "attempts": 0,
+                           "delay": 0.0, "chapter_count": 0, "overwrite": False,
+                           "convert_webp": False, "create_cbz": False,
+                           "total_bytes": 0, "bank_bytes": 0}]}, ensure_ascii=False),
+    encoding="utf-8")
+qapp.load_queue()
+check("queue restored from .bak",
+      len(qapp.queue_tasks) == 1 and qapp.queue_tasks[0].id == "rb1",
+      str(qapp.queue_tasks))
+check("queue .corrupt quarantine", (qdir / "queue.json.corrupt").exists())
+qapp.closing = True
+
+# Fresh path: self_check must be a no-op on a brand-new db file.
+store3 = HistoryStore(store_dir / "fresh.db")
+check("fresh db self_check no-op", store3.count() >= 0)
+store3.close()
+
+section("Phase 10.4: queue-level progress header + bar")
+
+# Use the main app (its pump is alive); snapshot and restore its queue state.
+saved_tasks, saved_active = app.queue_tasks, app.active_task
+try:
+    t_active, t_done = (manga_gui.QueueTask("http://x/1", str(BASE / "o1"), 1, 0.0, False, False, False),
+                        manga_gui.QueueTask("http://x/2", str(BASE / "o2"), 1, 0.0, False, False, False))
+    app.queue_tasks = [t_active, t_done]
+    app.active_task = None
+
+    # bank_bytes only banks on final states, through the real pump handler.
+    t_active.state = "active"
+    t_active.total_bytes = 12345
+    app.active_task = t_active
+    app.emit("queue_state", (t_active, ""))
+    pump(root, 0.4)
+    check("active task not banked", t_active.bank_bytes == 0, str(t_active.bank_bytes))
+
+    t_done.state = "completed"
+    t_done.total_bytes = 100000
+    app.emit("queue_state", (t_done, ""))
+    pump(root, 0.4)
+    check("completed task banks bytes", t_done.bank_bytes == 100000, str(t_done.bank_bytes))
+    check("queue_bytes_done = bank + live active", app.queue_bytes_done() == 112345,
+          str(app.queue_bytes_done()))
+
+    # Header label + bar reflect done/total (main-thread aggregate).
+    app.update_queue_progress()
+    check("queue header text", "1/2" in app.queue_progress_label["text"],
+          app.queue_progress_label["text"])
+    check("queue bar value", float(app.queue_progress["value"]) == 1.0,
+          str(app.queue_progress["value"]))
+
+    # Empty queue: label goes idle, bar resets.
+    app.queue_tasks = []
+    app.active_task = None
+    app.update_queue_progress()
+    check("empty queue label", "1/2" not in app.queue_progress_label["text"],
+          app.queue_progress_label["text"])
+    check("empty queue bar", float(app.queue_progress["value"]) == 0.0,
+          str(app.queue_progress["value"]))
+
+    # Bytes must survive a save/reload round-trip (from_dict restore).
+    t_done.bank_bytes = 55555
+    app.queue_tasks = [t_done]
+    app.save_queue()
+    app.queue_tasks = []
+    app.load_queue()
+    check("persisted bytes survive reload",
+          len(app.queue_tasks) == 1
+          and app.queue_tasks[0].total_bytes == 100000
+          and app.queue_tasks[0].bank_bytes == 55555,
+          f"total={getattr(app.queue_tasks[0], 'total_bytes', None) if app.queue_tasks else None} "
+          f"bank={getattr(app.queue_tasks[0], 'bank_bytes', None) if app.queue_tasks else None}")
+finally:
+    app.queue_tasks = saved_tasks
+    app.active_task = saved_active
+    app.update_queue_progress()
+
 section("Phase 9: frozen exe")
 
 exe = REPO_ROOT / "dist" / "MangaDownloader.exe"

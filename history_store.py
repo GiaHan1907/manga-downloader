@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -54,11 +55,72 @@ _RECORD_KEYS = ("id", "time", "source", "output", "status", "details", "url", "c
 class HistoryStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        HistoryStore.self_check(db_path)
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
         self._migrate_legacy_json()
+
+    # ---------- phase 10.3: corruption recovery ----------
+
+    @staticmethod
+    def self_check(db_path: Path) -> None:
+        """Validate the history database, recovering from a backup on damage.
+
+        A readable file that is not a valid history database (or an unreadable
+        one) is kept as <name>.corrupt and replaced by the newest <name>.bak.
+        Called before the connection opens, so any exception here is fatal by
+        design; callers may delete the file first to force a clean store.
+        """
+        if not db_path.exists() or db_path.stat().st_size == 0:
+            return
+        healthy = False
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                tables = {row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                healthy = integrity == "ok" and {"history", "history_events"} <= tables
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError:
+            healthy = False
+        if healthy:
+            return
+        corrupt = db_path.with_suffix(db_path.suffix + ".corrupt")
+        try:
+            db_path.replace(corrupt)
+        except OSError:
+            return
+        for backup in sorted(db_path.parent.glob(db_path.name + ".*.bak")):
+            try:
+                shutil.copy2(backup, db_path)
+                break
+            except OSError:
+                continue
+
+    def backup(self) -> None:
+        """Snapshot the live database into timestamped <name>.<stamp>.bak.
+
+        Keeps only the 3 newest backups; failures never break the caller.
+        """
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        target = self.db_path.with_name(f"{self.db_path.name}.{stamp}.bak")
+        try:
+            self._conn.execute("VACUUM INTO ?", (str(target),))
+            backups = sorted(self.db_path.parent.glob(self.db_path.name + ".*.bak"))
+            for old in backups[:-3]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+        except (sqlite3.Error, OSError):
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # ---------- migration ----------
 
