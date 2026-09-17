@@ -1379,6 +1379,8 @@ class MangaGui:
         self._task_bytes_delta = 0
         self._task_paused_seconds = 0.0
         self._last_transfer_snapshot: tuple[str, dict] | None = None
+        self._task_log_dirty = False  # pump-level task-log coalescing
+        self._log_editable = False    # mirror of the activity log's Tk state
 
         self.setup_theme()
         self.build_ui()
@@ -2007,11 +2009,36 @@ class MangaGui:
             )
 
     def refresh_task_log(self):
+        """Redraw the per-task log, appending only lines rendered before.
+
+        log_lines is append-only while a task runs, so a full rebuild on every
+        emitted line is O(N^2) over a long download. Keep the rendered line
+        count and append only the delta; switch tasks or shrinking lines
+        (rare: reload) fall back to one full redraw.
+        """
         if not hasattr(self, "task_log"):
+            return
+        task = self.viewed_task or self.active_task
+        cache = getattr(self, "_task_log_cache", None)
+        # Incremental append is only valid for a live task whose log_lines is
+        # the same list and has not shrunk; anything else falls back to one
+        # full redraw (which also handles the empty placeholder).
+        usable = (cache is not None and task is not None and cache[0] is task
+                  and isinstance(task.log_lines, list)
+                  and len(task.log_lines) >= cache[1])
+        if usable:
+            new_lines = task.log_lines[cache[1]:]
+            if not new_lines:
+                return
+            self.task_log.configure(state="normal")
+            for line in new_lines:
+                self.task_log.insert("end", line.rstrip() + "\n")
+            self.task_log.see("end")
+            self.task_log.configure(state="disabled")
+            self._task_log_cache = (task, cache[1] + len(new_lines))
             return
         self.task_log.configure(state="normal")
         self.task_log.delete("1.0", "end")
-        task = self.viewed_task or self.active_task
         if task is not None and task.log_lines:
             for line in task.log_lines:
                 self.task_log.insert("end", line.rstrip() + "\n")
@@ -2019,6 +2046,7 @@ class MangaGui:
         else:
             self.task_log.insert("end", self.text("task_log_empty") + "\n")
         self.task_log.configure(state="disabled")
+        self._task_log_cache = (task, len(task.log_lines) if task is not None else 0)
 
     def on_queue_select(self, _event=None):
         selected = self.selected_queue_tasks()
@@ -2731,15 +2759,21 @@ class MangaGui:
             self.output_var.set(selected)
 
     def write_log(self, message: str):
-        self.log.configure(state="normal")
+        # Track editable state in a Python flag instead of a cget() round-trip:
+        # steady state costs 3 Tk calls per line instead of 4-5.
+        if not self._log_editable:
+            self.log.configure(state="normal")
+            self._log_editable = True
         self.log.insert("end", message.rstrip() + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
+        self._log_editable = False
 
     def clear_log(self):
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
+        self._log_editable = False
 
     def open_output_folder(self):
         folder = Path(self.output_var.get()).expanduser()
@@ -3221,8 +3255,11 @@ class MangaGui:
                     else:
                         self.overall_progress_text.set(self.text("overall_all_progress", current=current))
                 elif kind == "task_log":
+                    # Coalesce: mark dirty, render once in finally after the
+                    # whole queue drains (one render per pump tick instead of
+                    # one per emitted line).
                     if value is self.active_task:
-                        self.refresh_task_log()
+                        self._task_log_dirty = True
                 elif kind == "queue_state":
                     task, details = value
                     if task.state in {"completed", "failed", "stopped"}:
@@ -3322,6 +3359,10 @@ class MangaGui:
         except queue.Empty:
             pass
         finally:
+            # One task-log render per tick, after all pending events drained.
+            if self._task_log_dirty and not self.closing:
+                self._task_log_dirty = False
+                self.refresh_task_log()
             # Always reschedule: one failing handler must not kill the pump.
             if not self.closing:
                 self._events_after_id = self.root.after(100, self.process_events)

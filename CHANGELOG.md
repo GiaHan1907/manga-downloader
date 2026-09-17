@@ -40,6 +40,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   with the field prefilled; when an instance is already running, the second
   launch forwards the URL through the single-instance show request (flag
   payload "show" = surface only, a URL = prefill and surface) and exits 0.
+- Performance: the per-task log panel no longer rebuilds its entire content
+  on every emitted log line during a download. It renders incrementally with
+  a rendered-line cache, and the event pump coalesces bursts into one render
+  per tick; a 400-line chapter log went from ~2.1 s of cumulative Tk work to
+  a few milliseconds. Activity-log writes track widget state in a Python flag
+  instead of an extra Tk round-trip per line.
 - Fixed a latent bug surfaced while testing 10.4: `QueueTask.from_dict`
   returned before restoring `total_bytes`/`bank_bytes`, so persisted byte
   totals were silently dropped on reload; the bytes now also survive app
