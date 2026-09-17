@@ -1,0 +1,66 @@
+name: Build release exe
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, verify, and attach exe
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Byte-compile sources (fast syntax gate)
+        run: python -m py_compile manga_gui.py download_manga.py history_store.py convert_icon.py
+
+      - name: Build executable
+        run: |
+          python convert_icon.py
+          python -m PyInstaller --noconfirm --clean MangaDownloader.spec
+
+      - name: Smoke-check exe version
+        run: dist/MangaDownloader.exe --version
+
+      - name: Full regression against the built exe
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -u tests/regression_all.py
+
+      - name: Attach exe to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -ne 'tag') {
+            Write-Output "Not a tag run - skipping release attachment."
+            exit 0
+          }
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag --json tagName --jq .tagName 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Output "Release $tag exists - replacing the exe asset."
+            gh release upload $tag dist/MangaDownloader.exe#MangaDownloader.exe --clobber
+          } else {
+            Write-Output "Creating release $tag with the exe."
+            gh release create $tag dist/MangaDownloader.exe#MangaDownloader.exe --title "Manga Downloader $tag" --generate-notes
+          }
