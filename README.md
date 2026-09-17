@@ -72,6 +72,10 @@ and PyInstaller, then creates `dist\MangaDownloader.exe`. The executable is
 windowed and can run without a separate Python installation. The same build is
 also described by `MangaDownloader.spec` for reproducible PyInstaller builds.
 
+The exe carries Windows version metadata from `version_info.txt` and accepts
+`--version` to print the app version (`MangaDownloader 1.0.0`). Releases are
+documented in `CHANGELOG.md`.
+
 ## Command-line interface
 
 Download the default chapter:

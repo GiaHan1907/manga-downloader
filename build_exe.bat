@@ -16,6 +16,12 @@ py convert_icon.py
 if errorlevel 1 exit /b 1
 py -m PyInstaller --noconfirm --clean MangaDownloader.spec
 if errorlevel 1 exit /b 1
+rem Smoke-check the version flag baked into the executable.
+dist\MangaDownloader.exe --version
+if errorlevel 1 (
+    echo ERROR: dist\MangaDownloader.exe --version failed.
+    exit /b 1
+)
 echo.
 echo Build complete: dist\MangaDownloader.exe
 endlocal
