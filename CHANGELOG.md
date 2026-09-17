@@ -4,6 +4,18 @@ All notable changes to Manga Downloader are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Phase 10.1 — Single-instance guard: a named Windows mutex denies a second
+  launch, which signals the running instance (flag file + main-thread poll)
+  to surface its window and exits cleanly; two apps can no longer share the
+  same `queue.json`/`history.db`.
+- Phase 10.2 — Crash log and fatal toast: `sys.excepthook` and
+  `threading.excepthook` write `crash-*.crash.log` (traceback, version,
+  activity-log tail) into AppData and a non-modal toast surfaces the error;
+  fatal errors no longer vanish silently.
+
 ## [1.0.0] — 2026-09-16
 
 First feature-complete release covering ROADMAP phases 0–9.

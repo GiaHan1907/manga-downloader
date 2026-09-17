@@ -540,6 +540,56 @@ app.close_all_toasts()
 # ===========================================================================
 # PHASE 9 — frozen exe: version resource + --version contract
 # ===========================================================================
+section("Phase 10.1: single-instance guard")
+
+g1 = manga_gui.SingleInstanceGuard()
+g2 = manga_gui.SingleInstanceGuard()
+check("first instance owns guard", g1.is_owner)
+check("second instance denied", not g2.is_owner)
+g1.request_show()
+check("show request consumed once", g1.is_show_requested() and not g1.is_show_requested())
+# A real second launch through main(): it must exit 0 without touching Tk and
+# ask the owning instance to surface its window.
+app.guard = g1
+root.withdraw()
+second_exit = manga_gui.main([])
+check("second launch exits 0", second_exit == 0, str(second_exit))
+check("existing window surfaced by poll",
+      pump_until(root, lambda: root.state() == "normal", timeout=3, label="window surfaced"),
+      root.state())
+root.withdraw()
+g1.release()
+
+section("Phase 10.2: crash log + fatal toast")
+
+before_logs = set(BASE.glob("crash-*.crash.log"))
+try:
+    raise RuntimeError("suite-fatal-42")
+except RuntimeError:
+    sys.excepthook(*sys.exc_info())
+pump(root, 0.5)   # deliver crash_report through the real pump -> toast + log
+new_logs = set(BASE.glob("crash-*.crash.log")) - before_logs
+check("crash log written for main-thread error", len(new_logs) == 1, str(len(new_logs)))
+check("crash log contains error and version",
+      new_logs and "suite-fatal-42" in new_logs.pop().read_text(encoding="utf-8")
+      and "version: 1.0.0" in " ".join(p.read_text(encoding="utf-8") for p in BASE.glob("crash-*.crash.log")))
+check("fatal toast shown", any(t.winfo_exists() for t in app.toasts))
+check("activity log records crash", "[crash]" in app.log.get("1.0", "end"))
+app.close_all_toasts()
+
+# Thread errors must take the same path (threading.excepthook).
+def _boom():
+    raise RuntimeError("suite-thread-fatal-7")
+
+threading.excepthook_sentinel = None
+t_boom = threading.Thread(target=_boom, name="suite-boom", daemon=True)
+t_boom.start()
+t_boom.join()
+pump(root, 0.5)
+check("thread crash logged",
+      any("suite-thread-fatal-7" in p.read_text(encoding="utf-8") for p in BASE.glob("crash-*.crash.log")))
+app.close_all_toasts()
+
 section("Phase 9: frozen exe")
 
 exe = REPO_ROOT / "dist" / "MangaDownloader.exe"

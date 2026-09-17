@@ -10,9 +10,11 @@ import secrets
 import shutil
 import subprocess
 import threading
+import traceback
 import time
 import zipfile
 import csv
+import ctypes
 import json
 import sqlite3
 import sys
@@ -39,6 +41,15 @@ try:
     import winsound
 except ImportError:  # Keep the GUI importable on non-Windows systems.
     winsound = None
+
+try:
+    import fcntl  # POSIX lock-file fallback for the single-instance guard
+except ImportError:  # Windows uses the named mutex instead.
+    fcntl = None
+
+if sys.platform == "win32":
+    # use_last_error=True preserves the Win32 error for ctypes.get_last_error().
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 
 def resource_path(filename: str) -> Path:
@@ -158,6 +169,8 @@ UI_TEXT = {
         "toast_queue_paused_body": "Resume from the queue panel to continue.",
         "toast_download_stopped": "Download stopped",
         "toast_download_stopped_body": "The download was stopped by user request.",
+        "toast_crash_title": "Unexpected error",
+        "toast_crash_body": "A fatal error occurred: {error}. Details were written to the crash log.",
         "settings_output": "Current output folder",
         "open_folder": "Open folder",
         "open_folder_action": "Open folder",
@@ -405,6 +418,8 @@ UI_TEXT = {
         "toast_queue_paused_body": "Bấm tiếp tục ở bảng hàng đợi để chạy tiếp.",
         "toast_download_stopped": "Đã dừng tải",
         "toast_download_stopped_body": "Tải xuống đã được dừng theo yêu cầu.",
+        "toast_crash_title": "Lỗi bất thường",
+        "toast_crash_body": "Đã xảy ra lỗi nghiêm trọng: {error}. Chi tiết đã được ghi vào tệp crash log.",
         "settings_output": "Thư mục lưu hiện tại",
         "open_folder": "Mở thư mục",
         "open_folder_action": "Mở thư mục",
@@ -542,6 +557,124 @@ UI_TEXT = {
         "event_chapter": "Hoàn tất chương {number} ({count} ảnh).",
     },
 }
+
+
+class SingleInstanceGuard:
+    """Phase 10.1: keep a second app instance from sharing the data files.
+
+    Windows: a named mutex held for the process lifetime. Other platforms:
+    an exclusive lock file in AppData. A second launch acquires nothing and
+    relies on the existing instance to surface itself via the show event.
+    """
+
+    MUTEX_NAME = "MangaDownloader_SingleInstance_Mutex"
+    ERROR_ALREADY_EXISTS = 183
+
+    def __init__(self):
+        self.handle = None
+        self.is_owner = False
+        if sys.platform == "win32":
+            self.handle = _kernel32.CreateMutexW(None, False, self.MUTEX_NAME)
+            self.is_owner = bool(self.handle) and ctypes.get_last_error() != self.ERROR_ALREADY_EXISTS
+        else:
+            lock_path = MangaGui._app_data_dir() / "app.lock"
+            self.handle = open(lock_path, "w")
+            try:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.is_owner = True
+            except OSError:
+                self.is_owner = False
+
+    def release(self):
+        if self.handle is None:
+            return
+        try:
+            if sys.platform == "win32":
+                _kernel32.ReleaseMutex(self.handle)
+                _kernel32.CloseHandle(self.handle)
+            elif fcntl is not None:
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+                self.handle.close()
+        except OSError:
+            pass
+        self.handle = None
+        self.is_owner = False
+
+    def request_show(self):
+        """Signal the owning instance to surface its window (best effort)."""
+        try:
+            show_path = MangaGui._app_data_dir() / "show-instance.flag"
+            show_path.write_text(str(os.getpid()), encoding="utf-8")
+        except OSError:
+            pass
+
+    def is_show_requested(self) -> bool:
+        """Consume the show request written by a second launch."""
+        show_path = MangaGui._app_data_dir() / "show-instance.flag"
+        try:
+            show_path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+
+
+def install_crash_logging(app: "MangaGui | None", log_tail_size: int = 50):
+    """Phase 10.2: never die silently.
+
+    Replaces sys.excepthook and threading.excepthook with handlers that write
+    a crash-YYYYMMDD-HHMMSS.log (traceback, version, log tail) into AppData
+    and push a crash_report event so the main thread can surface a fatal
+    toast. Falls back to the previous default behavior when the app is
+    absent or already closing.
+    """
+    default_sys_hook = sys.excepthook
+    default_threading_hook = threading.excepthook
+
+    def handle_error(exc_type, exc_value, exc_traceback, source_label: str):
+        try:
+            if app is None or app.closing:
+                default_sys_hook(exc_type, exc_value, exc_traceback)
+            else:
+                crash_file = _write_crash_log(exc_type, exc_value, exc_traceback,
+                                              source_label, app, log_tail_size)
+                app.emit("crash_report", (str(exc_value), str(crash_file)))
+        except Exception:
+            default_sys_hook(exc_type, exc_value, exc_traceback)
+
+    def sys_hook(exc_type, exc_value, exc_traceback):
+        handle_error(exc_type, exc_value, exc_traceback, "main thread")
+
+    def threading_hook(args: threading.ExceptHookArgs):
+        handle_error(args.exc_type, args.exc_value, args.exc_traceback,
+                     f"thread {args.thread.name if args.thread else 'unknown'}")
+
+    sys.excepthook = sys_hook
+    threading.excepthook = threading_hook
+
+
+def _write_crash_log(exc_type, exc_value, exc_traceback, source_label: str,
+                     app: "MangaGui", log_tail_size: int) -> Path:
+    """Write the crash log synchronously; returns the file path."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    crash_file = app.get_settings_file().parent / f"crash-{stamp}.crash.log"
+    try:
+        tail = app.log.get("end-49l", "end").strip()
+    except Exception:
+        tail = "(activity log unavailable)"
+    header = (
+        "MangaDownloader crash log",
+        f"time: {datetime.now().isoformat()}",
+        f"version: {APP_VERSION}",
+        f"source: {source_label}",
+        f"python: {sys.version.split()[0]}",
+        "",
+    )
+    body = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    content = "\n".join(header) + "\n" + body + "\n--- last activity ---\n" + tail + "\n"
+    crash_file.write_text(content, encoding="utf-8")
+    return crash_file
 
 
 class QueueTask:
@@ -1152,6 +1285,10 @@ class MangaGui:
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.closing = False
+        # Phase 10.1: set by main() to enforce a single app instance.
+        self.guard = None
+        # Phase 10.2: allow tests to detach the process-wide crash hook.
+        self._crash_hook_token = None
         self.tray_icon = None
         self.toasts: list[tk.Toplevel] = []
         self.settings = AppSettings(self.get_settings_file())
@@ -1213,6 +1350,10 @@ class MangaGui:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.start_tray()
         self.root.after(100, self.process_events)
+        # Phase 10.2: fatal errors must leave a trace and surface a toast.
+        install_crash_logging(self)
+        # Phase 10.1: watch for show requests from a second launch.
+        self.root.after(300, self._poll_show_requests)
 
     @staticmethod
     def _app_data_dir() -> Path:
@@ -1398,6 +1539,21 @@ class MangaGui:
         self.root.focus_force()
         # Keep the title with version visible even without a terminal.
         self.root.title(self.text("window_title") + f"  ·  v{APP_VERSION}")
+
+    def _poll_show_requests(self):
+        """Phase 10.1: surface the window when a second launch asks."""
+        if self.closing:
+            return
+        if self.guard is not None and self.guard.is_show_requested():
+            self._show_window()
+        self.root.after(300, self._poll_show_requests)
+
+    def log_history(self) -> list[str]:
+        """Return up to 200 recent activity log lines (crash log tail)."""
+        try:
+            return self.log.get("end-199l", "end").splitlines()
+        except Exception:
+            return []
 
     def on_close(self):
         if self.closing:
@@ -2954,6 +3110,15 @@ class MangaGui:
                     self.start_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
                     self.show_toast(self.text("toast_download_stopped"), self.text("toast_download_stopped_body"), "info")
+                elif kind == "crash_report":
+                    # Phase 10.2: surface a fatal error without blocking.
+                    error_text, crash_file = value
+                    self.write_log(f"[crash] {error_text} -> {crash_file}")
+                    self.show_toast(
+                        self.text("toast_crash_title"),
+                        self.text("toast_crash_body", error=error_text),
+                        "error",
+                    )
                 elif kind == "error":
                     self.write_log(str(value))
                     self.update_history(self.text("status_error"), str(value))
@@ -2978,9 +3143,19 @@ def main(argv=None):
     if "--version" in argv:
         print(f"MangaDownloader {APP_VERSION}")
         return 0
+    # Phase 10.1: one app at a time over the shared data files.
+    guard = SingleInstanceGuard()
+    if not guard.is_owner:
+        guard.request_show()
+        return 0
+
     root = tk.Tk()
-    MangaGui(root)
-    root.mainloop()
+    app = MangaGui(root)
+    app.guard = guard
+    try:
+        root.mainloop()
+    finally:
+        guard.release()
     return 0
 
 

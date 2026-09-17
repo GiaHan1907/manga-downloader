@@ -16,10 +16,10 @@ The current branch is `main`. The intended source entry point is `manga_gui.py`;
 - CBZ creation per chapter.
 - Per-page and overall progress bars.
 - English and Vietnamese UI text.
-- Completion popup and Windows completion sound with fallback.
+- Non-modal toast notifications and Windows completion sound with fallback (modal popups were replaced in Phase 8).
 - Manus-inspired dark workspace styling with purple accent, expanded sidebar, cards, spacing, and `MANUS WORKSPACE` badge.
 - Basic system tray behavior: closing the window hides it; tray menu can show the window or exit.
-- Persistent JSON download history with time, source, output path, status, and details; latest 100 records are retained.
+- SQLite download history (`history_store.py`, Phase 4) with per-record event trails, migrated once from the original JSON format; search, filters, sorting, and CSV export.
 - `MangaDownloader.png` used by the window/tray and bundled into the application.
 - Generated multi-size `MangaDownloader.ico` for Windows executable branding.
 - PyInstaller build script with cleanup of obsolete `pathlib` backport and locked old executable handling.
@@ -31,11 +31,9 @@ The current branch is `main`. The intended source entry point is `manga_gui.py`;
 
 ## Known limitations and risks
 
-- The `.exe` must be built on Windows. A previous build attempt failed when an old `dist\\MangaDownloader.exe` was still running/locked; always exit the tray application before rebuilding. `build_exe.bat` now attempts to terminate the old process and delete the old executable.
+- The `.exe` must be built on Windows. A previous build attempt failed when an old `dist\\MangaDownloader.exe` was still running/locked; always exit the tray application before rebuilding. `build_exe.bat` now attempts to terminate the old process and delete the old executable, and CI builds the exe on version tags.
 - The current tray feature depends on `pystray`; when it is unavailable in source development, close exits instead of minimizing.
-- Download history is JSON and is not yet a full queue database.
-- Sidebar entries for Archive and Settings are visual navigation items only; they do not yet switch pages.
-- The downloader currently has one active worker and no true pause/resume queue.
+- Installer, shortcuts, and CBZ file association remain open items; the portable exe is the only distribution.
 - Do not add scraping bypasses, CAPTCHA bypasses, paywall bypasses, or access-control workarounds.
 
 ## Phase plan
@@ -143,6 +141,53 @@ Acceptance: clean standalone EXE build and no orphan process after tray exit.
 
 - Add versioning, changelog, portable package, installer, shortcuts, optional CBZ association, and clean-install testing — done: `APP_VERSION = "1.0.0"` lives in `manga_gui.py` with a `--version` CLI flag (works in the windowed exe, prints and exits), the version is shown in the window title, the sidebar, and the tray tooltip; `version_info.txt` embeds Windows file/product metadata (verified via `Get-Item ... .VersionInfo`); `CHANGELOG.md` documents phases 0–9. The portable package is the one-file `dist\MangaDownloader.exe` (~36 MB, no console, PNG + ICO resources bundled, `pystray` hidden imports + `PIL._tkinter_finder`), rebuilt with `build_exe.bat` which now smoke-checks `--version` after building. The full build + runtime smoke was executed on this machine: build succeeds, `--version` prints `MangaDownloader 1.0.0`, the GUI process starts with a visible `Manga Downloader · v1.0.0` window (verified via EnumWindows on the onefile child process). Installer/shortcuts/CBZ association stay open: no installer toolchain is required for the portable exe, and code signing is deferred until a certificate is available.
 
+### Phase 10 — Long-session reliability and user reach
+
+**Status: In progress — 10.1 and 10.2 implemented and covered by the regression suite (88 checks).**
+
+Rationale: v1.0.0 completed the feature set; the remaining real-world risk is
+sessions that run for hours (a queue of hundreds of chapters) where an
+uncaught error currently dies silently, plus operational foot-guns (two app
+instances sharing one data store). Onboarding is the second axis: a new user
+sees an empty GUI with no hints. Every item below keeps the event-pump rule
+(#4) and the safety boundary intact.
+
+1. **Single-instance guard** — done: a named Windows mutex (`SingleInstanceGuard`, owned for the app's lifetime) denies a second launch, which signals the running instance through a flag file consumed by a 300 ms main-thread poll and exits 0; `main()` releases the mutex on shutdown. Acceptance verified: second launch exits 0 without touching the data files and the existing window is surfaced by the poll.
+
+2. **Crash log and fatal-error toast** — done: `install_crash_logging` replaces `sys.excepthook` and `threading.excepthook`, writing `crash-YYYYMMDD-HHMMSS.crash.log` (traceback, APP_VERSION, activity-log tail) into AppData and pushing a `crash_report` event so the pump shows a non-modal fatal toast; the hook falls back to the default behavior when the app is absent or closing. Acceptance verified: injected main-thread and thread exceptions both produce a readable log, a toast, and a logged crash line.
+
+3. **Data-file self-checks** — on startup, validate `history.db` (SQLite
+   integrity check) and `queue.json` (schema probe); on failure, keep the
+   damaged file as `.corrupt` and rebuild from `.bak` copies written after
+   every successful save. Acceptance: suite corrupts both files and the app
+   still boots with empty-but-working stores plus the backup restored.
+
+4. **Queue-level progress** — a `task i/N · M completed · total bytes` header
+   line and overall progress bar on the queue card, computed on the main
+   thread from task states (no new worker state). Acceptance: values update
+   live while the suite's fake downloader runs.
+
+5. **Richer history events** — persist per-task totals the worker already
+   computes but only partially records: pages downloaded, bytes, paused
+   seconds, attempts. Acceptance: a completed queue task's history event trail
+   shows pages/bytes/attempts without new plumbing.
+
+6. **Truncated-image guard** — when the server sends `Content-Length`, treat a
+   short read as a failed page (delete the partial file) so the existing
+   skip-existing resume refetches it instead of shipping a broken CBZ.
+   Acceptance: unit-style fake response shorter than its declared length is
+   detected and retried.
+
+7. **First-run onboarding hints** — empty-state bilingual hints on the queue,
+   history, and library cards ("Add a task with the URL field above", etc.)
+   that disappear once content exists. Acceptance: hints visible on a blank
+   sandbox first run (clean-install scenario) and gone after adding a task.
+
+8. **`--url` CLI-to-GUI bridge** — `MangaDownloader.exe --url <chapter-url>`
+   opens the GUI with the URL prefilled (and `--out <path>` optional), reusing
+   the existing single instance from item 1 when present. Acceptance: the
+   flag populates the URL field without starting a download.
+
 ## Working rules for future AI contributors
 
 1. Read this file and `README.md` before editing.
@@ -157,11 +202,12 @@ Acceptance: clean standalone EXE build and no orphan process after tray exit.
 
 ## Suggested next action
 
-Complete Phase 0 on Windows first. The immediate verification command is:
+Start with the remaining Phase 10 items in order — the next one is 10.3 (data-file self-checks). Verification harness:
 
 ```powershell
-cd D:\Project\Manga-Downloader
-build_exe.bat
+python -u tests\regression_all.py
+python -m PyInstaller --noconfirm --clean MangaDownloader.spec
 ```
 
-Then launch `dist\\MangaDownloader.exe`, confirm the title contains `Manus Workspace`, and verify the custom icon and tray behavior.
+CI runs the suite on every push and builds + verifies + attaches the exe on `v*` tags, so a Phase 10 release is: update `APP_VERSION`/`version_info.txt`/`CHANGELOG.md`, commit, tag, push.
+
