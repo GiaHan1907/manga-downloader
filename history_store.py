@@ -12,9 +12,15 @@ the connection).
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+
+def _unique_record_id() -> str:
+    """Timestamp id + random suffix: immune to Windows timer coalescing."""
+    return datetime.now().strftime("%Y%m%d%H%M%S%f") + secrets.token_hex(2)
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS history (
@@ -98,7 +104,7 @@ class HistoryStore:
 
     def add_record(self, record: dict) -> str:
         """Insert or replace a record; returns the record id used."""
-        record_id = str(record.get("id") or datetime.now().strftime("%Y%m%d%H%M%S%f"))
+        record_id = str(record.get("id") or _unique_record_id())
         self._conn.execute(
             "INSERT OR REPLACE INTO history"
             " (id, time, source, output, status, details, url, chapters, pages, created_at)"

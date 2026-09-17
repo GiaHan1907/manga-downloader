@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -556,7 +557,7 @@ class QueueTask:
                  task_id: str | None = None, state: str = "queued", progress: str = "",
                  attempts: int = 0):
         now = datetime.now()
-        self.id = task_id or now.strftime("%Y%m%d%H%M%S%f")
+        self.id = task_id or _unique_id()
         self.url = url
         self.output_root = output_root
         self.chapter_count = chapter_count
@@ -638,6 +639,13 @@ class Tooltip:
         self.tipwindow = None
         if tw is not None:
             tw.destroy()
+
+
+def _unique_id() -> str:
+    """Timestamp id plus a random suffix so two objects created within the
+    same Windows timer tick (datetime.now() quantized ~15.6ms on older
+    systems) never collide and crash ttk tree inserts."""
+    return datetime.now().strftime("%Y%m%d%H%M%S%f") + secrets.token_hex(2)
 
 
 def natural_key(path: Path):
@@ -1428,7 +1436,7 @@ class MangaGui:
         self.root.destroy()
 
     def add_history(self, url: str, output_root: Path, selected_count: int):
-        record_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        record_id = _unique_id()
         self.history.add_record(
             {
                 "id": record_id,

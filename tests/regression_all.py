@@ -169,6 +169,9 @@ task1 = manga_gui.QueueTask("http://fake/manga/x/ch-1", str(BASE / "lib"), 1, 0.
                             False, False, False)
 task2 = manga_gui.QueueTask("http://fake/manga/y/ch-1", str(BASE / "lib"), 1, 0.0,
                             False, False, False)
+check("task ids unique under tight creation",
+      len({manga_gui.QueueTask("http://u", str(BASE), 1, 0.0, False, False, False).id
+           for _ in range(50)}) == 50)
 app.queue_tasks = [task1, task2]
 app.save_queue()
 check("queue persisted", (BASE / "queue.json").exists())
