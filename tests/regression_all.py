@@ -162,6 +162,7 @@ def fake_chapter(session, url, output_root, delay, timeout, overwrite,
     return title, 2, 1_234_567, 0.0
 
 
+_real_download_chapter = downloader.download_chapter
 downloader.download_chapter = fake_chapter
 downloader.make_session = lambda: types.SimpleNamespace(get=lambda *a, **k: None)
 
@@ -696,6 +697,96 @@ finally:
     app.queue_tasks = saved_tasks
     app.active_task = saved_active
     app.update_queue_progress()
+
+section("Phase 10.5: richer history events (pages/bytes/paused/attempts)")
+
+# One task through the real queue with the phase-2 fake downloader, which
+# reports 2 pages, 1_234_567 bytes and 0 paused seconds per chapter.
+pump(root, 0.5)
+t55 = manga_gui.QueueTask("http://fake/stats/ch-1", str(BASE / "lib5"), 1, 0.0, False, False, False)
+app.queue_tasks = [t55]
+app.start_queue()
+ok = pump_until(root, lambda: t55.state == "completed", label="10.5 task done")
+check("10.5 task completed", ok, t55.state)
+check("task pages recorded", getattr(t55, "last_pages", 0) == 2, str(getattr(t55, "last_pages", None)))
+record_id = f"{t55.id}-q"
+evs = app.history.events(record_id)
+kinds = {e["kind"] for e in evs}
+check("history has finished+transfer events", {"finished", "transfer"} <= kinds, str(kinds))
+transfer_msg = next((e["message"] for e in evs if e["kind"] == "transfer"), "")
+check("transfer event details", ("Pages 2" in transfer_msg or "Trang 2" in transfer_msg)
+      and ("attempts 1" in transfer_msg or "lần thử 1" in transfer_msg),
+      transfer_msg)
+rec55 = next((r for r in app.history.search("") if r.get("id") == record_id), None)
+check("record stores real page count", rec55 is not None and rec55.get("pages") == 2,
+      str(rec55 and rec55.get("pages")))
+
+section("Phase 10.6: truncated-image guard")
+
+# Restore the real downloader for these tests.
+downloader.download_chapter = _real_download_chapter
+
+
+class _FakeImageResponse:
+    def __init__(self, html=None, content=b"", headers=None, url="http://fake/img"):
+        self._html = html
+        self.content = content
+        self.headers = headers or {}
+        self.url = url
+
+    @property
+    def text(self):
+        return self._html
+
+    def raise_for_status(self):
+        pass
+
+
+_CH_HTML = ('<html><head><title>T06 Chapter 1</title></head><body>'
+            '<div class="reading-content"><img src="http://fake/1.jpg">'
+            '<img src="http://fake/2.jpg"></div></body></html>')
+
+
+class _TruncSession:
+    """Chapter page + two images; image 2 lies about its Content-Length."""
+
+    def __init__(self, truncate=True):
+        self.truncate = truncate
+
+    def get(self, url, headers=None, timeout=None):
+        if url == "http://trunc/ch":
+            return _FakeImageResponse(html=_CH_HTML, url=url)
+        if url.endswith("2.jpg") and self.truncate:
+            return _FakeImageResponse(content=b"x" * 400,
+                                      headers={"Content-Length": "1000",
+                                               "Content-Type": "image/jpeg"}, url=url)
+        return _FakeImageResponse(content=b"y" * 800,
+                                  headers={"Content-Length": "800",
+                                           "Content-Type": "image/jpeg"}, url=url)
+
+
+out6 = BASE / "t06-trunc"
+try:
+    downloader.download_chapter(_TruncSession(truncate=True), "http://trunc/ch", out6,
+                                0.0, 5, True)
+    check("truncated short read raises", False, "no exception raised")
+except downloader.TruncatedImageError as exc:
+    check("truncated short read raises", "400 of 1000" in str(exc), str(exc))
+ch_dirs = [p for p in out6.iterdir() if p.is_dir()] if out6.exists() else []
+check("page 1 kept before failure", len(ch_dirs) == 1 and (ch_dirs[0] / "0001.jpg").exists(),
+      str(ch_dirs))
+check("truncated page not written", not (ch_dirs and (ch_dirs[0] / "0002.jpg").exists()),
+      str(list(ch_dirs[0].iterdir()) if ch_dirs else []))
+
+# Honest lengths: the chapter completes normally (guard must not false-positive).
+out6b = BASE / "t06-ok"
+title_ok, total_ok, done_ok, paused_ok = downloader.download_chapter(
+    _TruncSession(truncate=False), "http://trunc/ch", out6b, 0.0, 5, True)
+check("honest download completes", (total_ok, done_ok, paused_ok) == (2, 2, 0.0),
+      f"{total_ok}/{done_ok}/{paused_ok}")
+ok_dirs = [p for p in out6b.iterdir() if p.is_dir()]
+check("both pages written", (ok_dirs[0] / "0001.jpg").exists() and (ok_dirs[0] / "0002.jpg").exists(),
+      str(list(ok_dirs[0].iterdir()) if ok_dirs else []))
 
 section("Phase 9: frozen exe")
 

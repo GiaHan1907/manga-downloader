@@ -143,7 +143,7 @@ Acceptance: clean standalone EXE build and no orphan process after tray exit.
 
 ### Phase 10 — Long-session reliability and user reach
 
-**Status: In progress — 10.1–10.4 implemented and covered by the regression suite (102 checks).**
+**Status: In progress — 10.1–10.6 implemented and covered by the regression suite (112 checks).**
 
 Rationale: v1.0.0 completed the feature set; the remaining real-world risk is
 sessions that run for hours (a queue of hundreds of chapters) where an
@@ -171,16 +171,21 @@ sees an empty GUI with no hints. Every item below keeps the event-pump rule
    Acceptance verified: the suite drives the real pump handler and asserts the
    header text, bar value, empty/full states, and a save/reload round-trip.
 
-5. **Richer history events** — persist per-task totals the worker already
-   computes but only partially records: pages downloaded, bytes, paused
-   seconds, attempts. Acceptance: a completed queue task's history event trail
-   shows pages/bytes/attempts without new plumbing.
+5. **Richer history events** — done: each finished task now stores a
+   language-aware `transfer` history event (`Pages N · size · paused ·
+   attempts`) and the history record's `pages` column holds the real page
+   count. The worker snapshots its attempt totals and pushes them through the
+   event pump; the pump handler is fault-isolated so a history error can never
+   kill event delivery. Acceptance verified: the suite runs a queue task and
+   asserts the event trail, the message content, and the record column.
 
-6. **Truncated-image guard** — when the server sends `Content-Length`, treat a
-   short read as a failed page (delete the partial file) so the existing
-   skip-existing resume refetches it instead of shipping a broken CBZ.
-   Acceptance: unit-style fake response shorter than its declared length is
-   detected and retried.
+6. **Truncated-image guard** — done: when the server declares
+   `Content-Length`, a short body raises `TruncatedImageError` before anything
+   is written, so no partial image ever lands on disk and retries (or the
+   skip-existing resume of a later run) refetch it cleanly. Acceptance
+   verified: a fake response 400/1000 bytes is rejected with no page file
+   written, an honest download of the same shape completes, and page 1 stays
+   intact for resume.
 
 7. **First-run onboarding hints** — empty-state bilingual hints on the queue,
    history, and library cards ("Add a task with the URL field above", etc.)
@@ -206,7 +211,7 @@ sees an empty GUI with no hints. Every item below keeps the event-pump rule
 
 ## Suggested next action
 
-Start with the remaining Phase 10 items in order — the next one is 10.5 (richer history events). Verification harness:
+Start with the remaining Phase 10 items in order — the next one is 10.7 (first-run onboarding hints). Verification harness:
 
 ```powershell
 python -u tests\regression_all.py

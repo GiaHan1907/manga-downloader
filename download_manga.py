@@ -37,6 +37,10 @@ class DownloadCancelled(RuntimeError):
     """Raised when the GUI requests a clean stop between page downloads."""
 
 
+class TruncatedImageError(RuntimeError):
+    """Phase 10.6: response body is shorter than the declared Content-Length."""
+
+
 def normalize_url(raw_url: str) -> str:
     """Accept a plain URL as well as a Markdown link copied from chat."""
     value = raw_url.strip()
@@ -268,6 +272,16 @@ def download_chapter(
         image_response.raise_for_status()
         if not image_response.content:
             raise RuntimeError(f"Empty image response: {image_url}")
+        # Phase 10.6: a short read against Content-Length means a truncated
+        # image. Fail the attempt WITHOUT writing the partial file, so the
+        # retry (or a later run that skips existing files) refetches the page.
+        expected = image_response.headers.get("Content-Length")
+        received = len(image_response.content)
+        if expected and received < int(expected):
+            raise TruncatedImageError(
+                f"Truncated image {index}/{len(image_urls)}: "
+                f"received {received} of {expected} bytes ({image_url})"
+            )
         ext = extension_from_response(image_response, image_url)
         target = chapter_dir / f"{index:04d}{ext}"
         target.write_bytes(image_response.content)

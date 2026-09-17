@@ -24,6 +24,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   (`task i/N · completed/failed · bytes`) and a thick progress bar computed on
   the main thread; byte totals are banked on final task states, persist in
   `queue.json`, and re-queued tasks stop contributing (no double counting).
+- Phase 10.5 — Richer history events: every finished task stores a `transfer`
+  history event with pages downloaded, bytes transferred, paused seconds and
+  attempts (localized EN/VI), and the history record's `pages` column now
+  holds the real page count; the pump handler for history writes is
+  fault-isolated so a database error cannot stop event delivery.
+- Phase 10.6 — Truncated-image guard: when the server declares
+  `Content-Length`, a short response body raises `TruncatedImageError` before
+  the file is written, so truncated images never enter chapter folders or CBZ
+  archives and retries refetch them via the existing skip-existing resume.
 - Fixed a latent bug surfaced while testing 10.4: `QueueTask.from_dict`
   returned before restoring `total_bytes`/`bank_bytes`, so persisted byte
   totals were silently dropped on reload; the bytes now also survive app

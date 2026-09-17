@@ -226,6 +226,8 @@ UI_TEXT = {
         "task_log_empty": "No log entries for this task.",
         "task_state_changed": "[{state}] {url} {details}",
         "task_progress_chapters": "{count} chapter(s)",
+        "history_transfer": "Pages {pages} · {bytes} · paused {paused} · attempts {attempts}",
+        "history_finished_near": "Finished near expected size ({bytes})",
         "task_progress_bytes": "{chapters} chapter(s) · {bytes} · {speed}",
         "tip_queue_add": "Add the chapter URL above to the queue with the current settings.",
         "tip_queue_start": "Download all queued tasks one by one (or only the selected ones).",
@@ -478,6 +480,8 @@ UI_TEXT = {
         "task_log_empty": "Tác vụ này chưa có nhật ký.",
         "task_state_changed": "[{state}] {url} {details}",
         "task_progress_chapters": "{count} chương",
+        "history_transfer": "Trang {pages} · {bytes} · tạm dừng {paused} · lần thử {attempts}",
+        "history_finished_near": "Hoàn tất gần đúng dung lượng mong đợi ({bytes})",
         "task_progress_bytes": "{chapters} chương · {bytes} · {speed}",
         "tip_queue_add": "Thêm URL chapter ở trên vào hàng đợi với thiết lập hiện tại.",
         "tip_queue_start": "Tải lần lượt các tác vụ đang chờ (hoặc chỉ những dòng đang chọn).",
@@ -1357,7 +1361,11 @@ class MangaGui:
         self.transfer_stable_rate = None
         self.eta_pages_done = 0
         self.eta_pages_total = 0
-        # Phase 10.4: running totals for the whole queue.
+        # Phase 10.5: per-attempt transfer snapshot for history events.
+        self._task_pages_total = 0
+        self._task_bytes_delta = 0
+        self._task_paused_seconds = 0.0
+        self._last_transfer_snapshot: tuple[str, dict] | None = None
 
         self.setup_theme()
         self.build_ui()
@@ -1444,6 +1452,25 @@ class MangaGui:
                 old.unlink(missing_ok=True)
         except OSError:
             pass
+
+    def record_transfer_event(self, task):
+        """Phase 10.5: persist the attempt's transfer totals as a history event.
+
+        The worker pushes a snapshot through the pump (no shared state read
+        here). Called after update_history_for_task so the record exists.
+        """
+        snapshot = getattr(self, "_last_transfer_snapshot", None)
+        if snapshot is None or snapshot[0] != task.id or not snapshot[1]:
+            return
+        value = snapshot[1]
+        record_id = f"{task.id}-q"
+        self.history.add_event(
+            record_id, "transfer",
+            self.text("history_transfer", pages=value["pages"],
+                      bytes=self.format_bytes(value["bytes"]),
+                      paused=self.format_duration(value["paused"]),
+                      attempts=task.attempts),
+        )
 
     def update_queue_progress(self):
         """Phase 10.4: aggregate queue progress (main thread, no new state)."""
@@ -1712,6 +1739,7 @@ class MangaGui:
                 "details": details,
                 "url": task.url,
                 "chapters": getattr(task, "last_chapters", 0) or 0,
+                "pages": getattr(task, "last_pages", 0) or 0,
             }
         )
         self.history.add_event(record_id, "finished", details)
@@ -2166,6 +2194,7 @@ class MangaGui:
                     timeout=self.settings.get("timeout"), naming=self.settings.get("naming"),
                 )
                 task.last_chapters = chapters
+                task.last_pages = self._task_pages_total
                 return "completed", chapters
             except downloader.DownloadCancelled:
                 task.log_lines.append(self.text("stopped", language))
@@ -2977,12 +3006,18 @@ class MangaGui:
         chapters_done = 0
         visited: set[str] = set()
         page_state = {"chapter": "", "current": 0, "total": 0}
+        # Phase 10.5: attempt-scoped transfer totals (worker thread only).
+        self._task_pages_total = 0
+        self._task_bytes_delta = 0
+        self._task_paused_seconds = 0.0
 
         def report_pages(chapter, current, total):
             page_state.update(chapter=chapter, current=current, total=total)
+            self._task_pages_total = max(self._task_pages_total, current)
             self.emit("page_progress", (chapter, current, total))
 
         def report_bytes(received, total_bytes, kbps):
+            self._task_bytes_delta = received
             self.emit("bytes_progress", (received, kbps, page_state["current"], page_state["total"], page_state["chapter"]))
 
         def report(message: str):
@@ -3010,7 +3045,9 @@ class MangaGui:
                     pause_event,
                     naming,
                 )
+                self._task_bytes_delta += chapter_bytes
                 chapter_dir = output_root / title
+                self._task_paused_seconds += paused_seconds
                 if convert_webp or create_cbz_option:
                     self.emit("state", ("state_converting", {}))
                     converted = convert_webp_to_jpg(chapter_dir)
@@ -3037,6 +3074,10 @@ class MangaGui:
                     report(self.text("no_next", language))
             if emit_terminal:
                 self.emit("done", self.text("completed_all", language, count=chapters_done))
+            if task is not None:
+                self.emit("task_transfer", (task.id, {"pages": self._task_pages_total,
+                                                     "bytes": self._task_bytes_delta,
+                                                     "paused": self._task_paused_seconds}))
             return chapters_done
         except downloader.DownloadCancelled as exc:
             message = str(exc)
@@ -3046,6 +3087,9 @@ class MangaGui:
             if emit_terminal:
                 self.emit("stopped", message)
             else:
+                self.emit("task_transfer", (task.id, {"pages": self._task_pages_total,
+                                                     "bytes": self._task_bytes_delta,
+                                                     "paused": self._task_paused_seconds}))
                 raise
         except requests.RequestException as exc:
             message = f"{self.text('network_error', language)}: {exc}"
@@ -3055,6 +3099,9 @@ class MangaGui:
             if emit_terminal:
                 self.emit("error", message)
             else:
+                self.emit("task_transfer", (task.id, {"pages": self._task_pages_total,
+                                                     "bytes": self._task_bytes_delta,
+                                                     "paused": self._task_paused_seconds}))
                 raise
         except Exception as exc:  # Keep worker errors visible in the GUI.
             message = f"{self.text('generic_error', language)}: {exc}"
@@ -3064,6 +3111,9 @@ class MangaGui:
             if emit_terminal:
                 self.emit("error", message)
             else:
+                self.emit("task_transfer", (task.id, {"pages": self._task_pages_total,
+                                                     "bytes": self._task_bytes_delta,
+                                                     "paused": self._task_paused_seconds}))
                 raise
         return chapters_done
 
@@ -3141,9 +3191,16 @@ class MangaGui:
                     self.write_log(self.text("task_state_changed", state=self.queue_state_text(task), url=task.url, details=details))
                     if task.state == "active":
                         self.set_state("state_active")
+                elif kind == "task_transfer":
+                    task_id, snapshot = value
+                    self._last_transfer_snapshot = (task_id, snapshot)
                 elif kind == "queue_task_finished":
                     task, ok = value
-                    self.update_history_for_task(task)
+                    try:
+                        self.update_history_for_task(task)
+                        self.record_transfer_event(task)
+                    except Exception as exc:  # one bad event must not kill the pump
+                        self.write_log(f"history event error: {exc}")
                 elif kind == "queue_done":
                     self.queue_running = False
                     self.queue_paused = False
