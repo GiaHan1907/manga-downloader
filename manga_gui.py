@@ -644,6 +644,23 @@ def natural_key(path: Path):
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", path.name)]
 
 
+def _fs_retry(func, *args, attempts: int = 6, delay: float = 0.15):
+    """Run a filesystem op, retrying the transient Windows sharing locks.
+
+    Antivirus scanners, search indexers and image viewers can hold a file
+    for a moment, failing rename/rmtree with PermissionError. Retrying for
+    about a second covers every realistic case without user-visible delay.
+    """
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            return func(*args)
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(delay * (attempt + 1))
+    raise last_error if last_error else OSError("filesystem operation failed")
+
+
 def convert_webp_to_jpg(chapter_dir: Path) -> int:
     """Create JPG copies of WebP pages; preserve original WebP files."""
     converted = 0
@@ -1023,8 +1040,9 @@ class ArchiveWindow(tk.Toplevel):
             messagebox.showerror(app.text("library_title"), app.text("library_name_exists"))
             return
         try:
-            item.cbz.rename(target.with_name(target.name + ".cbz")) if item.cbz else None
-            item.folder.rename(target)
+            if item.cbz:
+                _fs_retry(item.cbz.rename, target.with_name(target.name + ".cbz"))
+            _fs_retry(item.folder.rename, target)
         except OSError as exc:
             messagebox.showerror(app.text("generic_error"), str(exc))
             return
@@ -1044,9 +1062,9 @@ class ArchiveWindow(tk.Toplevel):
         if not messagebox.askyesno(app.text("library_delete"), prompt, icon="warning"):
             return
         try:
-            shutil.rmtree(item.folder)
+            _fs_retry(shutil.rmtree, item.folder)
             if item.has_cbz:
-                item.cbz.unlink()
+                _fs_retry(item.cbz.unlink)
         except OSError as exc:
             messagebox.showerror(app.text("generic_error"), str(exc))
             return
@@ -1397,6 +1415,13 @@ class MangaGui:
                 task.state = "queued"
         self.save_queue()
         self.closing = True
+        # Cancel the pending pump tick so it cannot fire on a destroyed app.
+        pending_tick = getattr(self, "_events_after_id", None)
+        if pending_tick:
+            try:
+                self.root.after_cancel(pending_tick)
+            except Exception:
+                pass
         self.close_all_toasts()
         if self.tray_icon is not None:
             self.tray_icon.stop()
@@ -2823,6 +2848,8 @@ class MangaGui:
                     self.set_state("status_downloading_speed", chapter=chapter, speed=speed,
                                    bytes=self.format_bytes(self.transfer_bytes), eta=eta)
                     active = self.active_task
+                    if active is not None:
+                        active.last_bytes = received
                     if active is not None and hasattr(self, "queue_tree"):
                         active.progress = self.text(
                             "task_progress_bytes",
@@ -2931,7 +2958,8 @@ class MangaGui:
             pass
         finally:
             # Always reschedule: one failing handler must not kill the pump.
-            self.root.after(100, self.process_events)
+            if not self.closing:
+                self._events_after_id = self.root.after(100, self.process_events)
 
 
 APP_VERSION = "1.0.0"
