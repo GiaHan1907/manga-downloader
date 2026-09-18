@@ -1610,7 +1610,9 @@ class MangaGui:
         remaining_bytes = (self.eta_pages_total - self.eta_pages_done) * avg_page_bytes
         remaining_seconds = remaining_bytes / 1024.0 / max(self.transfer_stable_rate, 1e-6)
         return speed, self.text("eta_value", time=self.format_duration(remaining_seconds))
-    # Status-bar state label -> indicator dot color.
+    # Status-bar state label -> indicator dot color (theme-aware instance
+    # copy is rebuilt in setup_theme; this class dict is the fallback used
+    # before setup_theme runs).
     STATE_COLORS = {
         "ready": "#49d69c",
         "state_paused": "#fbbf24",
@@ -1633,6 +1635,17 @@ class MangaGui:
         """Single entry point for the status bar: label text + dot color."""
         self.status_text.set(self.text(text_key, **values))
         self.state_dot.configure(fg=self.STATE_COLORS.get(text_key, self.colors["muted"]))
+
+    # Queue row state -> Treeview tag. Colors resolve from the theme at
+    # refresh time (see refresh_queue_tree).
+    STATE_TAGS = {
+        "queued": "st-neutral",
+        "active": "st-run",
+        "paused": "st-warn",
+        "completed": "st-ok",
+        "stopped": "st-neutral",
+        "failed": "st-err",
+    }
 
     def tray_image(self):
         try:
@@ -2006,6 +2019,7 @@ class MangaGui:
             tree.insert(
                 "", "end", iid=task.id,
                 values=(self.queue_state_text(task), task.url, task.progress or "—", task.output_root),
+                tags=(self.STATE_TAGS.get(task.state, "st-neutral"),),
             )
 
     def refresh_task_log(self):
@@ -2320,11 +2334,17 @@ class MangaGui:
         "input": "#eef1f7",
         "border": "#d4dbe7",
         "text": "#17233b",
-        "muted": "#5c6b84",
+        "muted": "#5f6b84",          # 5.3:1 on card (WCAG AA)
         "accent": "#6a48ff",
-        "accent_hover": "#8a6dff",
-        "green": "#1d9e6f",
-        "danger": "#d64545",
+        "accent_hover": "#5b3fd6",
+        "accent_press": "#4c33c4",
+        "accent_strong": "#5b3fd6",  # primary fills that carry white text: 5.1:1
+        "accent_text": "#5b3fd6",    # accent used AS TEXT on tint: 5.7:1
+        "accent_disabled": "#ccd3ec",
+        "green": "#0a7d54",          # 5.2:1 on white
+        "danger": "#c2373b",         # 5.4:1 on white
+        "warning": "#a16207",        # 4.9:1 on white
+        "info": "#2563eb",
     }
 
     DARK_COLORS = {
@@ -2334,12 +2354,25 @@ class MangaGui:
         "input": "#0c131d",
         "border": "#202c3b",
         "text": "#f1f5f9",
-        "muted": "#94a3b8",
+        "muted": "#7e89a6",          # 5.3:1 on card (WCAG AA)
         "accent": "#7c5cff",
         "accent_hover": "#9278ff",
-        "green": "#49d69c",
+        "accent_press": "#5f45d6",
+        "accent_strong": "#6f52ee",  # primary fills that carry white text: 5.1:1
+        "accent_text": "#b3a3ff",    # accent used AS TEXT on tint: 7.4:1
+        "accent_disabled": "#40357c",
+        "green": "#34d399",
         "danger": "#f87171",
+        "warning": "#fbbf24",
+        "info": "#38bdf8",
     }
+
+    @staticmethod
+    def _blend_hex(fg: str, bg: str, alpha: float) -> str:
+        """Alpha-blend two #rrggbb colors (fg over bg) -> #rrggbb."""
+        f = [int(fg[i:i + 2], 16) for i in (1, 3, 5)]
+        b = [int(bg[i:i + 2], 16) for i in (1, 3, 5)]
+        return "#" + "".join(f"{round(a * alpha + c * (1 - alpha)):02x}" for a, c in zip(f, b))
 
     def setup_theme(self):
         theme = "dark"
@@ -2362,6 +2395,32 @@ class MangaGui:
         else:
             self.colors = dict(self.DARK_COLORS)
         self.density = density
+        # Theme-aware semantic colors (ported from the audited redesign demo):
+        # every text-bearing color passes WCAG AA on its theme's surfaces.
+        # Instance dicts shadow the class-level dark defaults.
+        self.STATE_COLORS = {
+            "ready": self.colors["green"],
+            "state_paused": self.colors["warning"],
+            "state_preparing": self.colors["warning"],
+            "state_downloading": self.colors["accent_text"],
+            "status_downloading_speed": self.colors["accent_text"],
+            "downloading": self.colors["accent_text"],
+            "state_active": self.colors["accent_text"],
+            "state_converting": self.colors["info"],
+            "state_creating_cbz": self.colors["info"],
+            "stopping": self.colors["warning"],
+            "status_complete": self.colors["green"],
+            "queue_done": self.colors["green"],
+            "status_stopped": self.colors["muted"],
+            "queue_paused": self.colors["muted"],
+            "status_error": self.colors["danger"],
+        }
+        self.TOAST_COLORS = {
+            "success": self.colors["green"],
+            "error": self.colors["danger"],
+            "info": self.colors["accent"],
+            "warning": self.colors["warning"],
+        }
         self.root.configure(bg=self.colors["bg"])
         style = ttk.Style(self.root)
         style.theme_use("clam")
@@ -2375,16 +2434,30 @@ class MangaGui:
         style.configure("TEntry", fieldbackground=self.colors["input"], foreground=self.colors["text"], insertcolor=self.colors["text"], bordercolor=self.colors["border"], lightcolor=self.colors["border"], darkcolor=self.colors["border"], padding=10)
         style.map("TEntry", bordercolor=[("focus", self.colors["accent"])], lightcolor=[("focus", self.colors["accent"])])
         style.configure("TSpinbox", fieldbackground=self.colors["input"], foreground=self.colors["text"], arrowcolor=self.colors["muted"], bordercolor=self.colors["border"], padding=7)
-        style.configure("TButton", background="#1a2432", foreground=self.colors["text"], bordercolor=self.colors["border"], padding=(14, 9), font=("Segoe UI", 9, "bold"))
-        style.map("TButton", background=[("active", "#253247"), ("disabled", "#141c27")], foreground=[("disabled", "#64748b")])
-        style.configure("Accent.TButton", background=self.colors["accent"], foreground="white", bordercolor=self.colors["accent"], padding=(18, 10), font=("Segoe UI", 10, "bold"))
-        style.map("Accent.TButton", background=[("active", self.colors["accent_hover"]), ("disabled", "#40357c")])
+        style.configure("TButton", background=self._blend_hex(self.colors["text"], self.colors["card"], 0.06), foreground=self.colors["text"], bordercolor=self.colors["border"], padding=(14, 9), font=("Segoe UI", 9, "bold"))
+        style.map("TButton", background=[("active", self._blend_hex(self.colors["text"], self.colors["card"], 0.12)), ("disabled", self.colors["input"])], foreground=[("disabled", self.colors["muted"])])
+        style.configure("Accent.TButton", background=self.colors["accent_strong"], foreground="white", bordercolor=self.colors["accent_strong"], padding=(18, 10), font=("Segoe UI", 10, "bold"))
+        style.map("Accent.TButton", background=[("active", self.colors["accent_press"]), ("disabled", self.colors["accent_disabled"])])
         style.configure("TCheckbutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
         style.map("TCheckbutton", background=[("active", self.colors["card"])], foreground=[("disabled", "#687586")])
         style.configure("TRadiobutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
         style.map("TRadiobutton", background=[("active", self.colors["card"])], foreground=[("disabled", "#687586")])
-        style.configure("Horizontal.TProgressbar", troughcolor="#1a2534", background=self.colors["accent"], bordercolor="#1a2534", lightcolor=self.colors["accent"], darkcolor=self.colors["accent"], thickness=9)
-        style.configure("Big.Horizontal.TProgressbar", troughcolor="#1a2534", background=self.colors["accent"], bordercolor="#1a2534", lightcolor=self.colors["accent"], darkcolor=self.colors["accent"], thickness=14)
+        style.configure("Horizontal.TProgressbar", troughcolor=self.colors["input"], background=self.colors["accent_strong"], bordercolor=self.colors["input"], lightcolor=self.colors["accent_strong"], darkcolor=self.colors["accent_strong"], thickness=9)
+        style.configure("Big.Horizontal.TProgressbar", troughcolor=self.colors["input"], background=self.colors["accent_strong"], bordercolor=self.colors["input"], lightcolor=self.colors["accent_strong"], darkcolor=self.colors["accent_strong"], thickness=14)
+        # Queue state chips (ported from the audited redesign demo): the whole
+        # row gets the state tint (13% blend over card, like the demo's
+        # rgba-tint chips) and the state text uses the AA-safe theme color.
+        style.configure("Treeview", background=self.colors["card"], fieldbackground=self.colors["card"], foreground=self.colors["text"])
+        style.configure("Treeview.Heading", background=self.colors["card"], foreground=self.colors["muted"])
+        blend = self._blend_hex
+        card = self.colors["card"]
+        self._queue_tags = {
+            "st-run": (self.colors["accent_text"], blend(self.colors["accent"], card, 0.13)),
+            "st-ok": (self.colors["green"], blend(self.colors["green"], card, 0.12)),
+            "st-warn": (self.colors["warning"], blend(self.colors["warning"], card, 0.14)),
+            "st-err": (self.colors["danger"], blend(self.colors["danger"], card, 0.12)),
+            "st-neutral": (self.colors["muted"], card),
+        }
 
     def build_ui(self):
         shell = ttk.Frame(self.root, style="App.TFrame")
@@ -2400,12 +2473,14 @@ class MangaGui:
         tk.Frame(sidebar, bg=self.colors["border"], height=1).pack(fill="x", padx=20, pady=(0, 20))
 
         def nav_button(text, active=False, command=None):
+            # Active nav = soft accent fill (demo's active-nav tint) instead of
+            # a solid block; white text keeps AA contrast on accent_strong.
             return tk.Button(
                 sidebar, text=text, anchor="w", relief="flat", bd=0, cursor="hand2",
-                bg=self.colors["accent"] if active else self.colors["sidebar"],
-                fg="white" if active else self.colors["muted"],
-                activebackground=self.colors["accent_hover"] if active else "#17212c",
-                activeforeground="white", font=("Segoe UI", 10, "bold" if active else "normal"),
+                bg=self._blend_hex(self.colors["accent"], self.colors["sidebar"], 0.16) if active else self.colors["sidebar"],
+                fg=self.colors["accent_text"] if active else self.colors["muted"],
+                activebackground=self._blend_hex(self.colors["accent"], self.colors["sidebar"], 0.26) if active else self.colors["input"],
+                activeforeground=self.colors["accent_text"] if active else self.colors["text"], font=("Segoe UI", 10, "bold" if active else "normal"),
                 padx=22, pady=12, command=command,
             )
 
@@ -2442,7 +2517,7 @@ class MangaGui:
         self.register_text("header_subtitle", ttk.Label(header_left, text="", style="Subtitle.TLabel")).pack(anchor="w", pady=(5, 0))
         header_right = ttk.Frame(header, style="App.TFrame")
         header_right.grid(row=0, column=1, sticky="e", padx=(20, 0))
-        badge = tk.Label(header_right, text="", bg=self.colors["accent"], fg="white", font=("Segoe UI", 8, "bold"), padx=10, pady=5)
+        badge = tk.Label(header_right, text="", bg=self.colors["accent_strong"], fg="white", font=("Segoe UI", 8, "bold"), padx=10, pady=5)
         self.register_text("ui_badge", badge).pack(side="left", padx=(0, 16))
         self.register_text("language", ttk.Label(header_right, text="", style="Subtitle.TLabel")).pack(side="left", padx=(0, 8))
         self.language_combo = ttk.Combobox(header_right, values=("English", "Tiếng Việt"), state="readonly", width=13)
@@ -2604,6 +2679,8 @@ class MangaGui:
         for column, width in (("state", 110), ("source", 340), ("progress", 150), ("output", 240)):
             self.queue_tree.heading(column, text=self.text(f"queue_col_{column}"))
             self.queue_tree.column(column, width=width, anchor="w", stretch=column in {"source", "output"})
+        for tag, (fg, bg) in getattr(self, "_queue_tags", {}).items():
+            self.queue_tree.tag_configure(tag, foreground=fg, background=bg)
         self.queue_progress_label = ttk.Label(queue_card, text="", style="Muted.TLabel")
         self.queue_progress_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.queue_progress = ttk.Progressbar(queue_card, style="Big.Horizontal.TProgressbar", maximum=1, value=0)
@@ -2613,7 +2690,7 @@ class MangaGui:
         self.queue_tree.bind("<<TreeviewSelect>>", self.on_queue_select)
         self.refresh_queue_tree()
         self.register_text("task_log_title", ttk.Label(queue_card, text="", style="Muted.TLabel")).grid(row=5, column=0, sticky="w", pady=(10, 4))
-        self.task_log = ScrolledText(queue_card, height=5, state="disabled", wrap="word", bg=self.colors["input"], fg="#b9c6d4", insertbackground=self.colors["text"], selectbackground="#264f78", relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
+        self.task_log = ScrolledText(queue_card, height=5, state="disabled", wrap="word", bg=self.colors["input"], fg=self.colors["muted"], insertbackground=self.colors["text"], selectbackground=self.colors["accent_disabled"], relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
         self.task_log.grid(row=6, column=0, sticky="ew")
         self.hint_queue = self.register_text("hint_queue", ttk.Label(queue_card, text="", style="Muted.TLabel", wraplength=640, justify="left"))
         self.hint_queue.grid(row=7, column=0, sticky="w", pady=(6, 0))
@@ -2631,8 +2708,7 @@ class MangaGui:
         clear_log_button = self.register_text("clear_log", ttk.Button(log_header, text="", command=self.clear_log))
         clear_log_button.pack(side="right", padx=(0, 8))
         Tooltip(clear_log_button, lambda: self.text("tip_clear_log"))
-        log_fg = "#b9c6d4" if self.colors["bg"] == self.DARK_COLORS["bg"] else "#33415a"
-        self.log = ScrolledText(log_card, height=7 if self.density == "compact" else 9, state="disabled", wrap="word", bg=self.colors["input"], fg=log_fg, insertbackground=self.colors["text"], selectbackground="#264f78", relief="flat", borderwidth=0, padx=12, pady=10, font=("Consolas", 9))
+        self.log = ScrolledText(log_card, height=7 if self.density == "compact" else 9, state="disabled", wrap="word", bg=self.colors["input"], fg=self.colors["muted"], insertbackground=self.colors["text"], selectbackground=self.colors["accent_disabled"], relief="flat", borderwidth=0, padx=12, pady=10, font=("Consolas", 9))
         self.log.grid(row=1, column=0, sticky="nsew")
 
         status = tk.Frame(main, bg=self.colors["bg"])

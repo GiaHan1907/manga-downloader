@@ -6,6 +6,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- UI theme overhaul ported from the audited redesign demo (`ui_redesign_demo.html`):
+  theme dictionaries gain AA-safe tokens (`accent_strong` for primary fills that
+  carry white text at 5.1:1, `accent_text` for accent used as text, theme-aware
+  `green`/`danger`/`warning`/`info`); the accent button, progress bars, nav
+  active state (soft tint instead of a solid block), header badge and log
+  selection colors all resolve from the theme; the status dot, toast accents
+  and queue rows are now theme-aware, so light mode no longer shows invisible
+  amber/red indicators. Queue rows are tinted by state (queued/active/paused/
+  completed/failed) via Treeview tags blended over the card color, matching the
+  demo's state chips; all muted text passes WCAG AA on both themes.
+
 ### Added
 - Phase 10.1 — Single-instance guard: a named Windows mutex denies a second
   launch, which signals the running instance (flag file + main-thread poll)
