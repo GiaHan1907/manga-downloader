@@ -24,6 +24,13 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
+try:
+    import ctk_compat
+except ImportError:  # frozen exe or missing dep: fall back to stock tkinter
+    ctk_compat = None
+else:
+    ctk_compat.install(sys.modules[__name__])
+
 import requests
 from PIL import Image, ImageOps, ImageTk
 
@@ -926,14 +933,18 @@ class ArchiveWindow(tk.Toplevel):
 
     THUMB = (132, 100)
 
-    def __init__(self, app: "MangaGui"):
-        super().__init__(app.root)
+    def __init__(self, app: "MangaGui", host=None):
+        # host=None -> standalone Toplevel (legacy); host=view frame -> the
+        # library is embedded as a workspace view of the main window.
+        self.host = host
         self.app = app
-        self.configure(bg=app.colors["bg"])
-        self.geometry("980x640")
-        self.minsize(760, 480)
-        self.iconphoto(True, app.icon_photo)
-        self.title(app.text("library_title"))
+        if host is None:
+            super().__init__(app.root)
+            self.configure(bg=app.colors["bg"])
+            self.geometry("980x640")
+            self.minsize(760, 480)
+            self.iconphoto(True, app.icon_photo)
+            self.title(app.text("library_title"))
         self.archive = ArchiveLibrary()
         self.items: list[ArchiveItem] = []
         self.filtered: list[ArchiveItem] = []
@@ -945,8 +956,9 @@ class ArchiveWindow(tk.Toplevel):
         # Thumbnail workers never touch tkinter: they push results into a
         # queue drained by this after() loop on the main thread (ROADMAP #4).
         self.thumb_results: queue.Queue = queue.Queue()
-        self.after(80, self._drain_thumbs)
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        app.root.after(80, self._drain_thumbs)
+        if host is None:
+            self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.rescan()
         self.refresh_items()
 
@@ -956,7 +968,8 @@ class ArchiveWindow(tk.Toplevel):
         except tk.TclError:
             pass
         self.app.update_hints()
-        super().destroy()
+        if self.host is None:
+            super().destroy()
 
     def _drain_thumbs(self):
         try:
@@ -965,14 +978,15 @@ class ArchiveWindow(tk.Toplevel):
                 self._apply_thumb(label, item, thumb)
         except queue.Empty:
             pass
-        if self.winfo_exists():
-            self.after(80, self._drain_thumbs)
+        if self.app.root.winfo_exists():
+            self.app.root.after(80, self._drain_thumbs)
 
     # ---------- UI ----------
 
     def _build(self):
         app = self.app
-        shell = ttk.Frame(self, style="App.TFrame", padding=20)
+        parent = self.host if self.host is not None else self
+        shell = ttk.Frame(parent, style="App.TFrame", padding=(0, 4, 0, 0))
         shell.pack(fill="both", expand=True)
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(1, weight=1)
@@ -1016,6 +1030,20 @@ class ArchiveWindow(tk.Toplevel):
         self.empty_label = None
         self.has_root = False  # Phase 10.7: any scanned output root yet?
 
+    def __getattr__(self, name):
+        # Hosted mode: this object is not a Tk widget, so route widget calls
+        # (winfo_exists, update, etc.) to the canvas it is rendered in.
+        # Only reached for attributes not found normally, and only when the
+        # canvas exists (during __init__ it does not yet, hence the guard via
+        # object.__getattribute__).
+        if name in ("master", "children"):
+            raise AttributeError(name)
+        try:
+            canvas = object.__getattribute__(self, "canvas")
+        except AttributeError:
+            raise AttributeError(name) from None
+        return getattr(canvas, name)
+
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
 
@@ -1024,8 +1052,9 @@ class ArchiveWindow(tk.Toplevel):
         self.refresh_items()
 
     def relocalize(self):
-        """Refresh window title, combobox values and labels after a language switch."""
-        self.title(self.app.text("library_title"))
+        """Refresh combobox values and labels after a language switch."""
+        if self.host is None:
+            self.title(self.app.text("library_title"))
         view = max(self.view_combo.current(), 0)
         self.view_combo.configure(values=(self.app.text("view_grid"), self.app.text("view_list")))
         self.view_combo.current(view)
@@ -1148,7 +1177,7 @@ class ArchiveWindow(tk.Toplevel):
     def _apply_thumb(self, label: tk.Label, item: ArchiveItem, thumb: Image.Image):
         if not label.winfo_exists() or not item.folder.exists():
             return
-        photo = ImageTk.PhotoImage(thumb, master=self)
+        photo = ImageTk.PhotoImage(thumb, master=self.canvas)
         label.configure(image=photo, width=self.THUMB[0], height=self.THUMB[1], text="")
         label.image = photo
         self._thumbs.append(photo)
@@ -1308,6 +1337,8 @@ class MangaGui:
         self.root.title("Manga Downloader · Manus Workspace")
         self.root.geometry("1180x800")
         self.root.minsize(1000, 700)
+        if ctk_compat is not None:
+            ctk_compat.apply_window_scaling(self.root)
         self.icon_photo = tk.PhotoImage(file=str(resource_path("MangaDownloader.png")))
         self.root.iconphoto(True, self.icon_photo)
 
@@ -2320,8 +2351,9 @@ class MangaGui:
         # Registered hint labels got the raw template above; re-evaluate them
         # against the actual content state.
         self.update_hints()
-        if getattr(self, "library_window", None) is not None and self.library_window.winfo_exists():
-            self.library_window.relocalize()
+        lw = getattr(self, "library_window", None)
+        if lw is not None and getattr(lw, "canvas", None) is not None and lw.canvas.winfo_exists():
+            lw.relocalize()
         if hasattr(self, "history_events_tree"):
             self.history_events_tree.heading("ts", text=self.text("history_time"))
             self.history_events_tree.heading("message", text=self.text("history_events"))
@@ -2421,7 +2453,13 @@ class MangaGui:
             "info": self.colors["accent"],
             "warning": self.colors["warning"],
         }
-        self.root.configure(bg=self.colors["bg"])
+        if ctk_compat is None:
+            # Under CTk the root surface is drawn by the CompatFrame shell, and
+            # ctk's global configure patch routes bg= into dead child frames
+            # during theme rebuilds. Stock tkinter keeps the old behavior.
+            self.root.configure(bg=self.colors["bg"])
+        if ctk_compat is not None:
+            ctk_compat.set_palette(self.colors)
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure("App.TFrame", background=self.colors["bg"])
@@ -2460,128 +2498,196 @@ class MangaGui:
         }
 
     def build_ui(self):
+        """Build the 4-view workspace (ported from the audited redesign demo):
+        a fixed sidebar switches Downloader / History / Library / Settings
+        views inside one window. Widget contracts used by the regression
+        suite and the event pump are unchanged.
+        """
         shell = ttk.Frame(self.root, style="App.TFrame")
         shell.pack(fill="both", expand=True)
 
-        sidebar = tk.Frame(shell, bg=self.colors["sidebar"], width=238)
+        sidebar = tk.Frame(shell, bg=self.colors["sidebar"], width=216)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
 
-        tk.Label(sidebar, text="✦", bg=self.colors["sidebar"], fg=self.colors["accent"], font=("Segoe UI Symbol", 30, "bold")).pack(anchor="w", padx=22, pady=(28, 0))
-        tk.Label(sidebar, text="MANGA DOWNLOADER", bg=self.colors["sidebar"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=23, pady=(0, 3))
-        self.register_text("tagline", tk.Label(sidebar, text="", bg=self.colors["sidebar"], fg=self.colors["muted"], font=("Segoe UI", 9))).pack(anchor="w", padx=23, pady=(0, 30))
-        tk.Frame(sidebar, bg=self.colors["border"], height=1).pack(fill="x", padx=20, pady=(0, 20))
+        brand = tk.Frame(sidebar, bg=self.colors["sidebar"])
+        brand.pack(fill="x", padx=16, pady=(18, 10))
+        brand_mark = tk.Label(brand, text="M", bg=self.colors["accent_strong"], fg="white",
+                              font=("Segoe UI", 12, "bold"), width=2, pady=2)
+        brand_mark.pack(side="left")
+        brand_text = tk.Frame(brand, bg=self.colors["sidebar"])
+        brand_text.pack(side="left", padx=(10, 0))
+        tk.Label(brand_text, text="MANGA DOWNLOADER", bg=self.colors["sidebar"], fg=self.colors["text"],
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        self.register_text("tagline", tk.Label(brand_text, text="", bg=self.colors["sidebar"],
+                                                fg=self.colors["muted"], font=("Segoe UI", 8))).pack(anchor="w")
 
-        def nav_button(text, active=False, command=None):
-            # Active nav = soft accent fill (demo's active-nav tint) instead of
-            # a solid block; white text keeps AA contrast on accent_strong.
-            return tk.Button(
-                sidebar, text=text, anchor="w", relief="flat", bd=0, cursor="hand2",
-                bg=self._blend_hex(self.colors["accent"], self.colors["sidebar"], 0.16) if active else self.colors["sidebar"],
-                fg=self.colors["accent_text"] if active else self.colors["muted"],
-                activebackground=self._blend_hex(self.colors["accent"], self.colors["sidebar"], 0.26) if active else self.colors["input"],
-                activeforeground=self.colors["accent_text"] if active else self.colors["text"], font=("Segoe UI", 10, "bold" if active else "normal"),
-                padx=22, pady=12, command=command,
-            )
+        self.nav_buttons = {}
 
-        self.register_text("nav_downloader", nav_button("", active=True)).pack(fill="x", padx=12, pady=2)
-        history_nav = nav_button("", command=self.show_history_window)
-        library_nav = nav_button("", command=self.open_library)
-        settings_nav = nav_button("", command=self.show_settings_window)
-        self.register_text("nav_archive", history_nav).pack(fill="x", padx=12, pady=2)
-        self.register_text("nav_library", library_nav).pack(fill="x", padx=12, pady=2)
-        self.register_text("nav_settings", settings_nav).pack(fill="x", padx=12, pady=2)
+        def nav_button(key, command):
+            btn = tk.Button(sidebar, text="", anchor="w", relief="flat", bd=0, cursor="hand2",
+                            bg=self.colors["sidebar"], fg=self.colors["muted"],
+                            activebackground=self.colors["input"], activeforeground=self.colors["text"],
+                            font=("Segoe UI", 10), padx=16, pady=9, command=command)
+            btn.pack(fill="x", padx=10, pady=1)
+            self.register_text(key, btn)
+            self.nav_buttons[key] = btn
+            return btn
+
+        nav_button("nav_downloader", lambda: self.show_view("downloader"))
+        nav_button("nav_archive", lambda: self.show_view("history"))
+        nav_button("nav_library", lambda: self.show_view("library"))
+        nav_button("nav_settings", lambda: self.show_view("settings"))
 
         sidebar_bottom = tk.Frame(sidebar, bg=self.colors["sidebar"])
-        sidebar_bottom.pack(side="bottom", fill="x", padx=20, pady=20)
+        sidebar_bottom.pack(side="bottom", fill="x", padx=16, pady=14)
         self.register_text("local_workspace", tk.Label(sidebar_bottom, text="", bg=self.colors["sidebar"], fg=self.colors["green"], font=("Segoe UI", 8, "bold"))).pack(anchor="w")
-        self.register_text("local_description", tk.Label(sidebar_bottom, text="", bg=self.colors["sidebar"], fg=self.colors["muted"], font=("Segoe UI", 8))).pack(anchor="w", pady=(5, 0))
+        self.register_text("local_description", tk.Label(sidebar_bottom, text="", bg=self.colors["sidebar"], fg=self.colors["muted"], font=("Segoe UI", 8))).pack(anchor="w")
         self.version_label = tk.Label(sidebar_bottom, text=f"v{APP_VERSION}", bg=self.colors["sidebar"], fg=self.colors["muted"], font=("Segoe UI", 8))
         self.version_label.pack(anchor="w", pady=(3, 0))
 
-        main = ttk.Frame(shell, style="App.TFrame", padding=(26 if self.density == "compact" else 34,
-                                                          20 if self.density == "compact" else 28,
-                                                          26 if self.density == "compact" else 34,
-                                                          14 if self.density == "compact" else 20))
+        # ---- main area: one topbar + one stack of view frames ----
+        main = ttk.Frame(shell, style="App.TFrame")
         main.pack(side="left", fill="both", expand=True)
         self.main_area = main
         main.columnconfigure(0, weight=1)
-        main.rowconfigure(8, weight=1)
+        main.rowconfigure(1, weight=1)
 
-        header = ttk.Frame(main, style="App.TFrame")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 24))
-        header.columnconfigure(0, weight=1)
-        header_left = ttk.Frame(header, style="App.TFrame")
-        header_left.grid(row=0, column=0, sticky="w")
-        self.register_text("header_title", ttk.Label(header_left, text="", style="Title.TLabel")).pack(anchor="w")
-        self.register_text("header_subtitle", ttk.Label(header_left, text="", style="Subtitle.TLabel")).pack(anchor="w", pady=(5, 0))
-        header_right = ttk.Frame(header, style="App.TFrame")
-        header_right.grid(row=0, column=1, sticky="e", padx=(20, 0))
-        badge = tk.Label(header_right, text="", bg=self.colors["accent_strong"], fg="white", font=("Segoe UI", 8, "bold"), padx=10, pady=5)
-        self.register_text("ui_badge", badge).pack(side="left", padx=(0, 16))
-        self.register_text("language", ttk.Label(header_right, text="", style="Subtitle.TLabel")).pack(side="left", padx=(0, 8))
-        self.language_combo = ttk.Combobox(header_right, values=("English", "Tiếng Việt"), state="readonly", width=13)
-        # Keep the active language across UI rebuilds (apply_appearance).
+        topbar = ttk.Frame(main, style="App.TFrame")
+        topbar.grid(row=0, column=0, sticky="ew", padx=(28, 28), pady=(18, 8))
+        topbar.columnconfigure(0, weight=1)
+        topbar_left = ttk.Frame(topbar, style="App.TFrame")
+        topbar_left.grid(row=0, column=0, sticky="w")
+        self.register_text("header_title", ttk.Label(topbar_left, text="", style="Title.TLabel")).pack(anchor="w")
+        self.register_text("header_subtitle", ttk.Label(topbar_left, text="", style="Subtitle.TLabel")).pack(anchor="w")
+        topbar_right = ttk.Frame(topbar, style="App.TFrame")
+        topbar_right.grid(row=0, column=1, sticky="e", padx=(20, 0))
+        self.register_text("language", ttk.Label(topbar_right, text="", style="Subtitle.TLabel")).pack(side="left", padx=(0, 8))
+        self.language_combo = ttk.Combobox(topbar_right, values=("English", "Tiếng Việt"), state="readonly", width=13)
         self.language_combo.current(0 if self.current_language == "en" else 1)
         self.language_combo.bind("<<ComboboxSelected>>", self.change_language)
         self.language_combo.pack(side="left")
 
-        source_card = ttk.Frame(main, style="Card.TFrame", padding=20)
-        source_card.grid(row=1, column=0, sticky="ew", pady=(0, 16))
-        source_card.columnconfigure(0, weight=1)
-        self.register_text("source", ttk.Label(source_card, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w")
-        self.register_text("chapter_url", ttk.Label(source_card, text="", style="CardTitle.TLabel")).grid(row=1, column=0, sticky="w", pady=(10, 6))
-        url_entry = ttk.Entry(source_card, textvariable=self.url_var)
-        url_entry.grid(row=2, column=0, sticky="ew")
-        Tooltip(url_entry, lambda: self.text("tip_url"))
+        self.view_stack = ttk.Frame(main, style="App.TFrame")
+        self.view_stack.grid(row=1, column=0, sticky="nsew")
+        self.view_stack.columnconfigure(0, weight=1)
+        self.view_stack.rowconfigure(0, weight=1)
+        self.views = {}
+        for name in ("downloader", "history", "library", "settings"):
+            frame = ttk.Frame(self.view_stack, style="App.TFrame", padding=(28, 8, 28, 16))
+            frame.grid(row=0, column=0, sticky="nsew")
+            self.views[name] = frame
 
-        option_row = ttk.Frame(main, style="App.TFrame")
-        option_row.grid(row=2, column=0, sticky="ew", pady=(0, 16))
+        self._build_downloader_view(self.views["downloader"])
+        self._build_history_view(self.views["history"])
+        self._build_library_view(self.views["library"])
+        self._build_settings_view(self.views["settings"])
+        self.show_view("downloader")
+
+        status = tk.Frame(main, bg=self.colors["bg"])
+        status.grid(row=2, column=0, sticky="ew", padx=28, pady=(4, 10))
+        self.state_dot = tk.Label(status, text="●", bg=self.colors["bg"], fg=self.colors["green"], font=("Segoe UI", 9))
+        self.state_dot.pack(side="left")
+        tk.Label(status, textvariable=self.status_text, bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(6, 0))
+        self.register_text("privacy", tk.Label(status, text="", bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 8))).pack(side="right")
+        self.change_language()
+
+    VIEW_HEADINGS = {
+        "downloader": ("header_title", "header_subtitle"),
+        "history": ("history", None),
+        "library": ("library_title", None),
+        "settings": ("settings_title", None),
+    }
+
+    def show_view(self, name: str):
+        """Raise one of the four workspace views and mark its nav active."""
+        for key, btn in self.nav_buttons.items():
+            active = key == f"nav_{name}"
+            btn.configure(
+                bg=self._blend_hex(self.colors["accent"], self.colors["sidebar"], 0.16) if active else self.colors["sidebar"],
+                fg=self.colors["accent_text"] if active else self.colors["muted"],
+                font=("Segoe UI", 10, "bold" if active else "normal"),
+            )
+        for view, frame in self.views.items():
+            frame.tkraise() if view == name else None
+        if name == "history":
+            self.refresh_history()
+        self.current_view = name
+
+    # ---------- the four workspace views ----------
+
+    def _card(self, parent, padding=(14, 12)):
+        card = ttk.Frame(parent, style="Card.TFrame", padding=padding)
+        card.columnconfigure(0, weight=1)
+        return card
+
+    def _card_head(self, parent, title_key, row=0):
+        head = ttk.Frame(parent, style="Card.TFrame")
+        head.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        head.columnconfigure(0, weight=1)
+        self.register_text(title_key, ttk.Label(head, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w")
+        return head
+
+    def _build_downloader_view(self, view):
+        view.columnconfigure(0, weight=1)
+        view.rowconfigure(4, weight=1)
+
+        action_row = ttk.Frame(view, style="App.TFrame")
+        action_row.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        action_row.columnconfigure(0, weight=1)
+        url_entry = ttk.Entry(action_row, textvariable=self.url_var)
+        url_entry.grid(row=0, column=0, sticky="ew", pady=2)
+        Tooltip(url_entry, lambda: self.text("tip_url"))
+        add_task_button = self.register_text("queue_add", ttk.Button(action_row, text="", style="Accent.TButton", command=self.add_queue_task))
+        add_task_button.grid(row=0, column=1, padx=(10, 0), sticky="ns")
+        Tooltip(add_task_button, lambda: self.text("tip_queue_add"))
+
+        option_row = ttk.Frame(view, style="App.TFrame")
+        option_row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         option_row.columnconfigure(0, weight=1)
         option_row.columnconfigure(1, weight=1)
+        option_row.columnconfigure(2, weight=1)
 
-        scope_card = ttk.Frame(option_row, style="Card.TFrame", padding=20)
+        scope_card = self._card(option_row, padding=(16, 12))
         scope_card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
         self.register_text("download_scope", ttk.Label(scope_card, text="", style="Muted.TLabel")).pack(anchor="w")
-        self.register_text("chapter_count", ttk.Label(scope_card, text="", style="CardTitle.TLabel")).pack(anchor="w", pady=(10, 8))
+        self.register_text("chapter_count", ttk.Label(scope_card, text="", style="CardTitle.TLabel")).pack(anchor="w", pady=(4, 6))
         scope_choices = ttk.Frame(scope_card, style="Card.TFrame")
         scope_choices.pack(anchor="w")
         for key, value in (("one_chapter", 1), ("five_chapters", 5), ("ten_chapters", 10), ("all_chapters", 0)):
-            self.register_text(key, ttk.Radiobutton(scope_choices, text="", value=value, variable=self.chapter_count)).pack(side="left", padx=(0, 12))
+            self.register_text(key, ttk.Radiobutton(scope_choices, text="", value=value, variable=self.chapter_count)).pack(side="left", padx=(0, 10))
 
-        output_card = ttk.Frame(option_row, style="Card.TFrame", padding=20)
-        output_card.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        output_card = self._card(option_row, padding=(16, 12))
+        output_card.grid(row=0, column=1, sticky="nsew", padx=7)
         self.register_text("output", ttk.Label(output_card, text="", style="Muted.TLabel")).pack(anchor="w")
-        self.register_text("archive_options", ttk.Label(output_card, text="", style="CardTitle.TLabel")).pack(anchor="w", pady=(10, 8))
+        self.register_text("archive_options", ttk.Label(output_card, text="", style="CardTitle.TLabel")).pack(anchor="w", pady=(4, 6))
         output_options = ttk.Frame(output_card, style="Card.TFrame")
         output_options.pack(anchor="w")
         webp_check = self.register_text("webp_jpg", ttk.Checkbutton(output_options, text="", variable=self.convert_var))
-        webp_check.grid(row=0, column=0, sticky="w", padx=(0, 14))
+        webp_check.grid(row=0, column=0, sticky="w", padx=(0, 12))
         cbz_check = self.register_text("create_cbz", ttk.Checkbutton(output_options, text="", variable=self.cbz_var))
         cbz_check.grid(row=0, column=1, sticky="w")
         redownload_check = self.register_text("redownload", ttk.Checkbutton(output_card, text="", variable=self.overwrite_var))
-        redownload_check.pack(anchor="w", pady=(8, 0))
+        redownload_check.pack(anchor="w", pady=(6, 0))
         Tooltip(webp_check, lambda: self.text("tip_webp"))
         Tooltip(cbz_check, lambda: self.text("tip_cbz"))
         Tooltip(redownload_check, lambda: self.text("tip_redownload"))
 
-        folder_card = ttk.Frame(main, style="Card.TFrame", padding=20)
-        folder_card.grid(row=3, column=0, sticky="ew", pady=(0, 16))
-        folder_card.columnconfigure(0, weight=1)
-        self.register_text("output_folder", ttk.Label(folder_card, text="", style="Muted.TLabel")).grid(row=0, column=0, columnspan=2, sticky="w")
+        folder_card = self._card(option_row, padding=(16, 12))
+        folder_card.grid(row=0, column=2, sticky="nsew", padx=(7, 0))
         folder_card.columnconfigure(1, weight=1)
-        folder_card.columnconfigure(2, weight=0)
+        self.register_text("output_folder", ttk.Label(folder_card, text="", style="Muted.TLabel")).grid(row=0, column=0, columnspan=2, sticky="w")
         folder_entry = ttk.Entry(folder_card, textvariable=self.output_var)
-        folder_entry.grid(row=1, column=1, sticky="ew", pady=(9, 0), padx=(0, 10))
+        folder_entry.grid(row=1, column=0, sticky="ew", pady=(8, 0), padx=(0, 8))
         choose_button = self.register_text("choose_folder", ttk.Button(folder_card, text="", command=self.choose_output))
-        choose_button.grid(row=1, column=2, pady=(9, 0), padx=(0, 8))
+        choose_button.grid(row=1, column=1, sticky="w", pady=(8, 0))
         open_button = self.register_text("open_folder", ttk.Button(folder_card, text="", command=self.open_output_folder))
-        open_button.grid(row=1, column=3, pady=(9, 0))
+        open_button.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         Tooltip(choose_button, lambda: self.text("tip_choose_folder"))
         Tooltip(open_button, lambda: self.text("tip_open_folder"))
 
-        actions = ttk.Frame(main, style="App.TFrame")
-        actions.grid(row=4, column=0, sticky="ew", pady=(0, 18))
+        actions = ttk.Frame(view, style="App.TFrame")
+        actions.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         self.register_text("start", ttk.Button(actions, text="", style="Accent.TButton", command=self.start))
         self.start_button = self.text_widgets["start"]
         self.start_button.pack(side="left")
@@ -2596,239 +2702,225 @@ class MangaGui:
         self.register_text("delay", ttk.Label(actions, text="", style="Subtitle.TLabel")).pack(side="left", padx=(25, 8))
         ttk.Spinbox(actions, from_=0, to=60, increment=0.5, width=7, textvariable=self.delay_var).pack(side="left")
 
-        progress_card = ttk.Frame(main, style="Card.TFrame", padding=20)
-        progress_card.grid(row=5, column=0, sticky="ew", pady=(0, 16))
-        progress_card.columnconfigure(0, weight=1)
+        progress_card = self._card(view, padding=(16, 12))
+        progress_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         ttk.Label(progress_card, textvariable=self.page_progress_text, style="CardText.TLabel").grid(row=0, column=0, sticky="w")
         self.page_progress = ttk.Progressbar(progress_card, mode="determinate", maximum=1, value=0)
-        self.page_progress.grid(row=1, column=0, sticky="ew", pady=(7, 12))
+        self.page_progress.grid(row=1, column=0, sticky="ew", pady=(7, 10))
         ttk.Label(progress_card, textvariable=self.overall_progress_text, style="CardText.TLabel").grid(row=2, column=0, sticky="w")
         self.overall_progress = ttk.Progressbar(progress_card, mode="determinate", maximum=1, value=0)
         self.overall_progress.grid(row=3, column=0, sticky="ew", pady=(7, 0))
 
-        history_card = ttk.Frame(main, style="Card.TFrame", padding=14)
-        history_card.grid(row=6, column=0, sticky="ew", pady=(0, 16))
-        history_card.columnconfigure(0, weight=1)
-        history_header = ttk.Frame(history_card, style="Card.TFrame")
-        history_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        history_header.columnconfigure(0, weight=1)
-        self.register_text("history", ttk.Label(history_header, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w")
-        self.history_count_label = ttk.Label(history_header, text="", style="Muted.TLabel")
-        self.history_count_label.grid(row=0, column=1, sticky="e", padx=(0, 10))
-        self.history_search_entry = ttk.Entry(history_header, textvariable=self.history_search_var, width=34)
-        self.history_search_entry.grid(row=0, column=2, sticky="e")
-        Tooltip(self.history_search_entry, lambda: self.text("tip_search_history"))
-        self.history_search_var.trace_add("write", lambda *_args: self.refresh_history())
-        history_tools = ttk.Frame(history_card, style="Card.TFrame")
-        history_tools.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        self.register_text("history_filters", ttk.Label(history_tools, text="", style="Subtitle.TLabel")).pack(side="left", padx=(0, 6))
-        self.history_filter_combo = ttk.Combobox(history_tools, state="readonly", width=14, values=())
-        self.history_filter_combo.pack(side="left")
-        self.history_filter_combo.bind("<<ComboboxSelected>>", self._on_history_filter_changed)
-        Tooltip(self.history_filter_combo, lambda: self.text("tip_history_filter"))
-        self.register_text("history_sort", ttk.Label(history_tools, text="", style="Subtitle.TLabel")).pack(side="left", padx=(16, 6))
-        self.history_sort_combo = ttk.Combobox(history_tools, state="readonly", width=13, values=())
-        self.history_sort_combo.pack(side="left")
-        self.history_sort_combo.bind("<<ComboboxSelected>>", self._on_history_sort_changed)
-        Tooltip(self.history_sort_combo, lambda: self.text("tip_history_sort"))
-        self.history_export_button = self.register_text("history_export", ttk.Button(history_tools, text="", command=self.export_history))
-        self.history_export_button.pack(side="right")
-        self.history_delete_button = self.register_text("history_delete", ttk.Button(history_tools, text="", command=self.delete_history_records))
-        self.history_delete_button.pack(side="right", padx=(0, 8))
-        Tooltip(self.history_delete_button, lambda: self.text("tip_history_delete"))
-        Tooltip(self.history_export_button, lambda: self.text("tip_history_export"))
-        self.history_tree = ttk.Treeview(history_card, columns=("time", "source", "status", "details"), show="headings", height=4)
-        for column, width in (("time", 145), ("source", 360), ("status", 120), ("details", 260)):
-            self.history_tree.heading(column, text=self.text(f"history_{column}"))
-            self.history_tree.column(column, width=width, anchor="w", stretch=column in {"source", "details"})
-        self.history_tree.grid(row=2, column=0, sticky="ew")
-        self.history_tree.bind("<<TreeviewSelect>>", self.on_history_select)
-        self.hint_history = self.register_text("hint_history", ttk.Label(history_card, text="", style="Muted.TLabel", wraplength=640, justify="left"))
-        self.hint_history.grid(row=3, column=0, sticky="w", pady=(6, 0))
-        self._sync_history_combobox_values()
-        self.refresh_history()
-        self.update_hints()
-
-        queue_card = ttk.Frame(main, style="Card.TFrame", padding=14)
-        queue_card.grid(row=6, column=0, sticky="ew", pady=(0, 16))
-        queue_card.columnconfigure(0, weight=1)
+        queue_card = self._card(view, padding=(16, 12))
+        queue_card.grid(row=4, column=0, sticky="nsew")
+        queue_card.rowconfigure(4, weight=1)
         queue_header = ttk.Frame(queue_card, style="Card.TFrame")
-        queue_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        queue_header.columnconfigure(0, weight=1)
-        self.register_text("queue", ttk.Label(queue_header, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w")
+        queue_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.register_text("queue", ttk.Label(queue_header, text="", style="Muted.TLabel")).pack(side="left")
         self.queue_start_button = self.register_text("queue_start", ttk.Button(queue_header, text="", command=self.start_queue))
-        self.queue_start_button.grid(row=0, column=1, padx=(8, 0))
+        self.queue_start_button.pack(side="left", padx=(10, 0))
         self.queue_stop_button = self.register_text("queue_stop", ttk.Button(queue_header, text="", command=self.stop_queue, state="disabled"))
-        self.queue_stop_button.grid(row=0, column=2, padx=(8, 0))
+        self.queue_stop_button.pack(side="left", padx=(6, 0))
         self.queue_pause_button = self.register_text("queue_pause", ttk.Button(queue_header, text="", command=self.pause_queue, state="disabled"))
-        self.queue_pause_button.grid(row=0, column=3, padx=(8, 0))
+        self.queue_pause_button.pack(side="left", padx=(6, 0))
         self.queue_resume_button = self.register_text("queue_resume", ttk.Button(queue_header, text="", command=self.resume_queue, state="disabled"))
-        self.queue_resume_button.grid(row=0, column=4, padx=(8, 0))
-        Tooltip(self.queue_start_button, lambda: self.text("tip_queue_start"))
-        queue_tools = ttk.Frame(queue_card, style="Card.TFrame")
-        queue_tools.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        add_task_button = self.register_text("queue_add", ttk.Button(queue_tools, text="", command=self.add_queue_task))
-        add_task_button.pack(side="left")
-        Tooltip(add_task_button, lambda: self.text("tip_queue_add"))
-        self.register_text("queue_remove", ttk.Button(queue_tools, text="", command=self.remove_queue_tasks)).pack(side="left", padx=(8, 0))
-        self.register_text("queue_up", ttk.Button(queue_tools, text="", width=3, command=lambda: self.move_queue_tasks(-1))).pack(side="left", padx=(8, 0))
-        self.register_text("queue_down", ttk.Button(queue_tools, text="", width=3, command=lambda: self.move_queue_tasks(1))).pack(side="left", padx=(8, 0))
-        self.register_text("queue_retry", ttk.Button(queue_tools, text="", command=self.retry_failed_tasks)).pack(side="left", padx=(8, 0))
-        self.register_text("queue_clear_completed", ttk.Button(queue_tools, text="", command=self.clear_completed_tasks)).pack(side="left", padx=(8, 0))
-        self.queue_tree = ttk.Treeview(queue_card, columns=("state", "source", "progress", "output"), show="headings", height=4)
+        self.queue_resume_button.pack(side="left", padx=(6, 0))
+        header_tools = {
+            "queue_remove": self.remove_queue_tasks,
+            "queue_up": lambda: self.move_queue_tasks(-1),
+            "queue_down": lambda: self.move_queue_tasks(1),
+            "queue_retry": self.retry_failed_tasks,
+            "queue_clear_completed": self.clear_completed_tasks,
+        }
+        for key, cmd in header_tools.items():
+            width = 3 if key in ("queue_up", "queue_down") else None
+            kwargs = {"width": width} if width else {}
+            self.register_text(key, ttk.Button(queue_header, text="", command=cmd, **kwargs)).pack(side="left", padx=(6, 0))
+
+        self.queue_progress_label = ttk.Label(queue_card, text="", style="Muted.TLabel")
+        self.queue_progress_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.queue_progress = ttk.Progressbar(queue_card, style="Big.Horizontal.TProgressbar", maximum=1, value=0)
+        Tooltip(self.queue_progress, lambda: self.text("queue_progress_title"))
+        self.queue_progress.grid(row=2, column=0, sticky="ew", pady=(4, 6))
+
+        self.queue_tree = ttk.Treeview(queue_card, columns=("state", "source", "progress", "output"), show="headings", height=5)
         for column, width in (("state", 110), ("source", 340), ("progress", 150), ("output", 240)):
             self.queue_tree.heading(column, text=self.text(f"queue_col_{column}"))
             self.queue_tree.column(column, width=width, anchor="w", stretch=column in {"source", "output"})
         for tag, (fg, bg) in getattr(self, "_queue_tags", {}).items():
             self.queue_tree.tag_configure(tag, foreground=fg, background=bg)
-        self.queue_progress_label = ttk.Label(queue_card, text="", style="Muted.TLabel")
-        self.queue_progress_label.grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.queue_progress = ttk.Progressbar(queue_card, style="Big.Horizontal.TProgressbar", maximum=1, value=0)
-        Tooltip(self.queue_progress, lambda: self.text("queue_progress_title"))
-        self.queue_progress.grid(row=3, column=0, sticky="ew", pady=(4, 0))
-        self.queue_tree.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        self.queue_tree.grid(row=3, column=0, sticky="ew")
         self.queue_tree.bind("<<TreeviewSelect>>", self.on_queue_select)
         self.refresh_queue_tree()
-        self.register_text("task_log_title", ttk.Label(queue_card, text="", style="Muted.TLabel")).grid(row=5, column=0, sticky="w", pady=(10, 4))
-        self.task_log = ScrolledText(queue_card, height=5, state="disabled", wrap="word", bg=self.colors["input"], fg=self.colors["muted"], insertbackground=self.colors["text"], selectbackground=self.colors["accent_disabled"], relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
-        self.task_log.grid(row=6, column=0, sticky="ew")
-        self.hint_queue = self.register_text("hint_queue", ttk.Label(queue_card, text="", style="Muted.TLabel", wraplength=640, justify="left"))
-        self.hint_queue.grid(row=7, column=0, sticky="w", pady=(6, 0))
-        self.refresh_task_log()
 
-        log_card = ttk.Frame(main, style="Card.TFrame", padding=16)
-        log_card.grid(row=8, column=0, sticky="nsew")
-        log_card.columnconfigure(0, weight=1)
-        log_card.rowconfigure(1, weight=1)
-        log_header = ttk.Frame(log_card, style="Card.TFrame")
-        log_header.grid(row=0, column=0, sticky="ew", pady=(0, 9))
+        split = ttk.Frame(queue_card, style="Card.TFrame")
+        split.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        split.columnconfigure(0, weight=3)
+        split.columnconfigure(1, weight=2)
+        split.rowconfigure(1, weight=1)
+
+        self.register_text("task_log_title", ttk.Label(split, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.task_log = ScrolledText(split, height=6, state="disabled", wrap="word", bg=self.colors["input"], fg=self.colors["muted"], insertbackground=self.colors["text"], selectbackground=self.colors["accent_disabled"], relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
+        self.task_log.grid(row=1, column=0, sticky="nsew", padx=(0, 7))
+
+        right = ttk.Frame(split, style="Card.TFrame")
+        right.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+        right.rowconfigure(1, weight=1)
+        log_header = ttk.Frame(right, style="Card.TFrame")
+        log_header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         self.register_text("activity_log", ttk.Label(log_header, text="", style="Muted.TLabel")).pack(side="left")
         self.activity_toggle_button = ttk.Button(log_header, text="", width=10, command=self.toggle_log)
         self.activity_toggle_button.pack(side="right")
         clear_log_button = self.register_text("clear_log", ttk.Button(log_header, text="", command=self.clear_log))
         clear_log_button.pack(side="right", padx=(0, 8))
         Tooltip(clear_log_button, lambda: self.text("tip_clear_log"))
-        self.log = ScrolledText(log_card, height=7 if self.density == "compact" else 9, state="disabled", wrap="word", bg=self.colors["input"], fg=self.colors["muted"], insertbackground=self.colors["text"], selectbackground=self.colors["accent_disabled"], relief="flat", borderwidth=0, padx=12, pady=10, font=("Consolas", 9))
+        self.log = ScrolledText(right, height=6, state="disabled", wrap="word", bg=self.colors["input"], fg=self.colors["muted"], insertbackground=self.colors["text"], selectbackground=self.colors["accent_disabled"], relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
         self.log.grid(row=1, column=0, sticky="nsew")
 
-        status = tk.Frame(main, bg=self.colors["bg"])
-        status.grid(row=9, column=0, sticky="ew", pady=(11, 0))
-        self.state_dot = tk.Label(status, text="●", bg=self.colors["bg"], fg=self.colors["green"], font=("Segoe UI", 9))
-        self.state_dot.pack(side="left")
-        tk.Label(status, textvariable=self.status_text, bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 9)).pack(side="left", padx=(6, 0))
-        self.register_text("privacy", tk.Label(status, text="", bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 8))).pack(side="right")
-        self.change_language()
+        self.hint_queue = self.register_text("hint_queue", ttk.Label(queue_card, text="", style="Muted.TLabel", wraplength=640, justify="left"))
+        self.hint_queue.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self.refresh_task_log()
+
+    def _build_history_view(self, view):
+        view.columnconfigure(0, weight=1)
+        view.rowconfigure(0, weight=1)
+        history_card = self._card(view, padding=(16, 12))
+        history_card.grid(row=0, column=0, sticky="nsew")
+        history_card.rowconfigure(2, weight=1)
+        history_card.rowconfigure(5, weight=1)
+
+        head = self._card_head(history_card, "history")
+        self.history_count_label = ttk.Label(head, text="", style="Muted.TLabel")
+        self.history_count_label.grid(row=0, column=1, sticky="e", padx=(0, 10))
+        tools = ttk.Frame(head, style="Card.TFrame")
+        tools.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.history_search_entry = ttk.Entry(tools, textvariable=self.history_search_var, width=32)
+        self.history_search_entry.pack(side="left")
+        Tooltip(self.history_search_entry, lambda: self.text("tip_search_history"))
+        self.history_search_var.trace_add("write", lambda *_args: self.refresh_history())
+        self.register_text("history_filters", ttk.Label(tools, text="", style="Subtitle.TLabel")).pack(side="left", padx=(14, 6))
+        self.history_filter_combo = ttk.Combobox(tools, state="readonly", width=14, values=())
+        self.history_filter_combo.pack(side="left")
+        self.history_filter_combo.bind("<<ComboboxSelected>>", self._on_history_filter_changed)
+        Tooltip(self.history_filter_combo, lambda: self.text("tip_history_filter"))
+        self.register_text("history_sort", ttk.Label(tools, text="", style="Subtitle.TLabel")).pack(side="left", padx=(14, 6))
+        self.history_sort_combo = ttk.Combobox(tools, state="readonly", width=13, values=())
+        self.history_sort_combo.pack(side="left")
+        self.history_sort_combo.bind("<<ComboboxSelected>>", self._on_history_sort_changed)
+        Tooltip(self.history_sort_combo, lambda: self.text("tip_history_sort"))
+        self.history_delete_button = self.register_text("history_delete", ttk.Button(tools, text="", command=self.delete_history_records))
+        self.history_delete_button.pack(side="right")
+        self.history_export_button = self.register_text("history_export", ttk.Button(tools, text="", command=self.export_history))
+        self.history_export_button.pack(side="right", padx=(0, 8))
+        Tooltip(self.history_delete_button, lambda: self.text("tip_history_delete"))
+        Tooltip(self.history_export_button, lambda: self.text("tip_history_export"))
+
+        self.history_tree = ttk.Treeview(history_card, columns=("time", "source", "status", "details"), show="headings", height=7)
+        for column, width in (("time", 145), ("source", 360), ("status", 120), ("details", 260)):
+            self.history_tree.heading(column, text=self.text(f"history_{column}"))
+            self.history_tree.column(column, width=width, anchor="w", stretch=column in {"source", "details"})
+        self.history_tree.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+        self.history_tree.bind("<<TreeviewSelect>>", self.on_history_select)
+        self.hint_history = self.register_text("hint_history", ttk.Label(history_card, text="", style="Muted.TLabel", wraplength=640, justify="left"))
+        self.hint_history.grid(row=3, column=0, sticky="w", pady=(6, 0))
+
+        self.register_text("history_events", ttk.Label(history_card, text="", style="Muted.TLabel")).grid(row=4, column=0, sticky="w", pady=(12, 4))
+        self.history_events_tree = ttk.Treeview(history_card, columns=("ts", "message"), show="headings", height=5)
+        self.history_events_tree.heading("ts", text=self.text("history_time"))
+        self.history_events_tree.heading("message", text=self.text("history_events"))
+        self.history_events_tree.column("ts", width=150, anchor="w", stretch=False)
+        self.history_events_tree.column("message", width=480, anchor="w", stretch=True)
+        self.history_events_tree.grid(row=5, column=0, sticky="nsew")
+        self._sync_history_combobox_values()
+        self.refresh_history()
+        self.update_hints()
+
+    def _build_library_view(self, view):
+        view.columnconfigure(0, weight=1)
+        view.rowconfigure(0, weight=1)
+        self.library_window = ArchiveWindow(self, host=view)
+
+    def _build_settings_view(self, view):
+        view.columnconfigure(0, weight=1)
+        view.rowconfigure(0, weight=1)
+        self.sync_settings_form()
+        grid = ttk.Frame(view, style="App.TFrame")
+        grid.grid(row=0, column=0, sticky="nsew")
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+
+        left = ttk.Frame(grid, style="App.TFrame")
+        left.grid(row=0, column=0, sticky="n", padx=(0, 7))
+        left.columnconfigure(0, weight=1)
+        right = ttk.Frame(grid, style="App.TFrame")
+        right.grid(row=0, column=1, sticky="n", padx=(7, 0))
+        right.columnconfigure(0, weight=1)
+
+        def section(parent, key):
+            card = self._card(parent, padding=(16, 12))
+            card.pack(fill="x", pady=(0, 12))
+            ttk.Label(card, text=self.text(key), style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
+            return card
+
+        def field(card, key):
+            self.register_text(key, ttk.Label(card, text="", style="CardText.TLabel")).pack(anchor="w", pady=(6, 0))
+
+        dl = section(left, "settings_section_download")
+        field(dl, "settings_timeout")
+        self.settings_timeout_spin = ttk.Spinbox(dl, from_=5, to=120, width=6, textvariable=self.settings_timeout_var)
+        self.settings_timeout_spin.pack(anchor="w", pady=(2, 0))
+        Tooltip(self.settings_timeout_spin, lambda: self.text("tip_settings_timeout"))
+        field(dl, "settings_retries")
+        self.settings_retries_spin = ttk.Spinbox(dl, from_=1, to=10, width=4, textvariable=self.settings_retries_var)
+        self.settings_retries_spin.pack(anchor="w", pady=(2, 0))
+        Tooltip(self.settings_retries_spin, lambda: self.text("tip_settings_retries"))
+        field(dl, "settings_naming")
+        self.settings_naming_combo = ttk.Combobox(dl, state="readonly", width=32, textvariable=self.settings_naming_var,
+                                                  values=(self.text("naming_none"), self.text("naming_site"), self.text("naming_slug"), self.text("naming_full")))
+        self.settings_naming_combo.pack(anchor="w", pady=(2, 0))
+        ttk.Label(dl, text=self.text("settings_output"), style="CardText.TLabel").pack(anchor="w", pady=(10, 0))
+        ttk.Label(dl, textvariable=self.output_var, style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
+
+        nt = section(left, "settings_section_notify")
+        self.register_text("settings_sound", ttk.Checkbutton(nt, text="", variable=self.settings_sound_var)).pack(anchor="w")
+        self.register_text("settings_notify", ttk.Checkbutton(nt, text="", variable=self.settings_notify_var)).pack(anchor="w", pady=(4, 0))
+
+        win = section(right, "settings_section_window")
+        self.register_text("settings_tray", ttk.Checkbutton(win, text="", variable=self.settings_tray_var)).pack(anchor="w")
+
+        ap = section(right, "settings_section_appearance")
+        row2 = ttk.Frame(ap, style="Card.TFrame")
+        row2.pack(fill="x")
+        self.register_text("settings_language", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
+        self.settings_lang_combo = ttk.Combobox(row2, state="readonly", width=12, values=("English", "Tiếng Việt"),
+                                                textvariable=self.settings_lang_var)
+        self.settings_lang_combo.pack(side="left", padx=(10, 22))
+        self.register_text("settings_theme", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
+        self.settings_theme_combo = ttk.Combobox(row2, state="readonly", width=12, textvariable=self.settings_theme_var,
+                                                 values=(self.text("theme_dark"), self.text("theme_light"), self.text("theme_system")))
+        self.settings_theme_combo.pack(side="left", padx=(10, 22))
+        self.register_text("settings_density", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
+        self.settings_density_combo = ttk.Combobox(row2, state="readonly", width=13, textvariable=self.settings_density_var,
+                                                   values=(self.text("density_comfortable"), self.text("density_compact")))
+        self.settings_density_combo.pack(side="left")
+
+        actions = ttk.Frame(right, style="App.TFrame")
+        actions.pack(anchor="w", pady=(2, 0))
+        self.register_text("settings_save", ttk.Button(actions, text="", style="Accent.TButton", command=self.save_settings)).pack(side="left")
+        self.register_text("settings_reset", ttk.Button(actions, text="", command=self.reset_settings)).pack(side="left", padx=(10, 0))
+        self.settings_status_label = ttk.Label(right, text="", style="Muted.TLabel")
+        self.settings_status_label.pack(anchor="w", pady=(8, 0))
 
     def show_history_window(self):
-        self._show_auxiliary_window("history")
-
-    def open_library(self):
-        if hasattr(self, "library_window") and self.library_window.winfo_exists():
-            self.library_window.deiconify()
-            self.library_window.lift()
-            self.library_window.focus_set()
-            return
-        self.library_window = ArchiveWindow(self)
-        return self.library_window
+        self.show_view("history")
 
     def show_settings_window(self):
-        self._show_auxiliary_window("settings")
+        self.show_view("settings")
 
-    def _show_auxiliary_window(self, kind: str):
-        window = tk.Toplevel(self.root)
-        window.configure(bg=self.colors["bg"])
-        window.geometry("900x520" if kind == "history" else "620x360")
-        window.minsize(560, 300)
-        window.iconphoto(True, self.icon_photo)
-        if kind == "history":
-            window.title(self.text("history"))
-            shell = ttk.Frame(window, style="App.TFrame", padding=24)
-            shell.pack(fill="both", expand=True)
-            shell.columnconfigure(0, weight=1)
-            shell.rowconfigure(2, weight=3)
-            shell.rowconfigure(4, weight=1)
-            ttk.Label(shell, text=self.text("history"), style="Title.TLabel").grid(row=0, column=0, sticky="w")
-            search = ttk.Entry(shell, textvariable=self.history_search_var)
-            search.grid(row=1, column=0, sticky="ew", pady=(16, 12))
-            Tooltip(search, lambda: self.text("tip_search_history"))
-            tree = ttk.Treeview(shell, columns=("time", "source", "status", "details"), show="headings")
-            for column in ("time", "source", "status", "details"):
-                tree.heading(column, text=self.text(f"history_{column}"))
-                tree.column(column, width=150 if column != "source" else 330, anchor="w", stretch=True)
-            tree.grid(row=2, column=0, sticky="nsew")
-            self.history_detail_tree = tree
-            self.history_events_tree = ttk.Treeview(shell, columns=("ts", "message"), show="headings", height=5)
-            self.history_events_tree.heading("ts", text=self.text("history_time"))
-            self.history_events_tree.heading("message", text=self.text("history_events"))
-            self.history_events_tree.column("ts", width=150, anchor="w", stretch=False)
-            self.history_events_tree.column("message", width=480, anchor="w", stretch=True)
-            ttk.Label(shell, text=self.text("history_events"), style="Subtitle.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 4))
-            self.history_events_tree.grid(row=4, column=0, sticky="nsew")
-            tree.bind("<<TreeviewSelect>>", self.on_history_select)
-            self.refresh_history()
-            self.on_history_select()
-        else:
-            window.title(self.text("settings_title"))
-            self.sync_settings_form()
-            shell = ttk.Frame(window, style="App.TFrame", padding=28)
-            shell.pack(fill="both", expand=True)
-            ttk.Label(shell, text=self.text("settings_title"), style="Title.TLabel").pack(anchor="w")
-            ttk.Label(shell, text=self.text("settings_note"), style="Subtitle.TLabel", wraplength=540).pack(anchor="w", pady=(6, 14))
-
-            def section_label(key):
-                ttk.Label(shell, text=self.text(key), style="CardTitle.TLabel").pack(anchor="w", pady=(10, 4))
-
-            # --- Download ---
-            section_label("settings_section_download")
-            row = ttk.Frame(shell, style="App.TFrame"); row.pack(fill="x")
-            self.register_text("settings_timeout", ttk.Label(row, text="", style="CardText.TLabel")).pack(side="left")
-            self.settings_timeout_spin = ttk.Spinbox(row, from_=5, to=120, width=6, textvariable=self.settings_timeout_var)
-            self.settings_timeout_spin.pack(side="left", padx=(10, 26))
-            Tooltip(self.settings_timeout_spin, lambda: self.text("tip_settings_timeout"))
-            self.register_text("settings_retries", ttk.Label(row, text="", style="CardText.TLabel")).pack(side="left")
-            self.settings_retries_spin = ttk.Spinbox(row, from_=1, to=10, width=4, textvariable=self.settings_retries_var)
-            self.settings_retries_spin.pack(side="left", padx=(10, 0))
-            Tooltip(self.settings_retries_spin, lambda: self.text("tip_settings_retries"))
-            self.register_text("settings_naming", ttk.Label(shell, text="", style="CardText.TLabel")).pack(anchor="w", pady=(8, 0))
-            self.settings_naming_combo = ttk.Combobox(shell, state="readonly", width=32, textvariable=self.settings_naming_var,
-                                                      values=(self.text("naming_none"), self.text("naming_site"), self.text("naming_slug"), self.text("naming_full")))
-            self.settings_naming_combo.pack(anchor="w", pady=(4, 0))
-
-            # --- Notifications ---
-            section_label("settings_section_notify")
-            self.register_text("settings_sound", ttk.Checkbutton(shell, text="", variable=self.settings_sound_var)).pack(anchor="w")
-            self.register_text("settings_notify", ttk.Checkbutton(shell, text="", variable=self.settings_notify_var)).pack(anchor="w", pady=(4, 0))
-
-            # --- Window ---
-            section_label("settings_section_window")
-            self.register_text("settings_tray", ttk.Checkbutton(shell, text="", variable=self.settings_tray_var)).pack(anchor="w")
-
-            # --- Appearance ---
-            section_label("settings_section_appearance")
-            row2 = ttk.Frame(shell, style="App.TFrame"); row2.pack(fill="x")
-            self.register_text("settings_language", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
-            self.settings_lang_combo = ttk.Combobox(row2, state="readonly", width=12, values=("English", "Tiếng Việt"),
-                                                    textvariable=self.settings_lang_var)
-            self.settings_lang_combo.pack(side="left", padx=(10, 26))
-            self.register_text("settings_theme", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
-            self.settings_theme_combo = ttk.Combobox(row2, state="readonly", width=12, textvariable=self.settings_theme_var,
-                                                     values=(self.text("theme_dark"), self.text("theme_light"), self.text("theme_system")))
-            self.settings_theme_combo.pack(side="left", padx=(10, 26))
-            self.register_text("settings_density", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
-            self.settings_density_combo = ttk.Combobox(row2, state="readonly", width=13, textvariable=self.settings_density_var,
-                                                       values=(self.text("density_comfortable"), self.text("density_compact")))
-            self.settings_density_combo.pack(side="left", padx=(10, 0))
-
-            ttk.Label(shell, text=self.text("settings_output"), style="CardText.TLabel").pack(anchor="w", pady=(12, 0))
-            ttk.Label(shell, textvariable=self.output_var, style="Subtitle.TLabel").pack(anchor="w", pady=(4, 0))
-
-            actions = ttk.Frame(shell, style="App.TFrame")
-            actions.pack(anchor="w", pady=(18, 0))
-            self.register_text("settings_save", ttk.Button(actions, text="", style="Accent.TButton", command=self.save_settings)).pack(side="left")
-            self.register_text("settings_reset", ttk.Button(actions, text="", command=self.reset_settings)).pack(side="left", padx=(10, 0))
-            self.settings_status_label = ttk.Label(shell, text="", style="Muted.TLabel")
-            self.settings_status_label.pack(anchor="w", pady=(10, 0))
-
+    def open_library(self):
+        # Historical contract: return the ArchiveWindow-shaped object, which
+        # now lives inside the Library view instead of a Toplevel.
+        return self.library_window
     def choose_output(self):
         selected = filedialog.askdirectory(title=self.text("choose_folder"))
         if selected:
@@ -2875,14 +2967,8 @@ class MangaGui:
         self.log_collapsed = not self.log_collapsed
         if self.log_collapsed:
             self.log.grid_remove()
-            self.main_area.rowconfigure(8, weight=0)
-            new_height = max(self.root.winfo_height() - 180, self.root.minsize()[1])
-            self.root.geometry(f"{self.root.winfo_width()}x{new_height}")
         else:
             self.log.grid()
-            self.main_area.rowconfigure(8, weight=1)
-            new_height = min(self.root.winfo_height() + 180, 900)
-            self.root.geometry(f"{self.root.winfo_width()}x{new_height}")
         self.activity_toggle_button.configure(
             text=self.text("activity_log_show" if self.log_collapsed else "activity_log_hide")
         )
@@ -2971,6 +3057,11 @@ class MangaGui:
                 child.destroy()
         for child in self.root.winfo_children():
             child.destroy()
+        # Views (and the embedded library) are gone; drop stale references so
+        # nothing relocalizes into a dead widget before build_ui recreates it.
+        self.library_window = None
+        self.views = {}
+        self.nav_buttons = {}
         self.setup_theme()
         self.build_ui()
 
@@ -3444,7 +3535,7 @@ class MangaGui:
                 self._events_after_id = self.root.after(100, self.process_events)
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 
 def main(argv=None):

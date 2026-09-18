@@ -4,6 +4,35 @@ All notable changes to Manga Downloader are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] — 2026-09-18
+
+### Added
+- CustomTkinter rendering layer (`ctk_compat.py`): the whole UI now draws
+  through CTk widgets — rounded cards, flat inputs, hover states — while the
+  legacy tk/ttk call surface (including `w["text"]`, `ttk.Combobox.current`,
+  progressbar `value`/`maximum`) stays intact, so behavior is unchanged.
+  Falls back to stock tkinter automatically if the dependency is missing.
+- `customtkinter` added to requirements and bundled into the frozen exe
+  (spec collects its theme data + submodules).
+
+### Changed
+- Buttons, entries, comboboxes, checkboxes and progress bars use the audited
+  palette from the redesign demo (accent-strong CTAs, AA-safe text colors)
+  under both dark and light themes; Text/Treeview are themed from the same
+  palette at build time and on every theme rebuild.
+- Full workspace restructure ported from the audited redesign demo
+  (`ui_redesign_demo.html`): the main window now hosts all four areas
+  (Downloader / History / Library / Settings) as switchable views behind the
+  sidebar, replacing the History and Settings pop-up windows and the separate
+  library window. The Downloader view gains the demo's one-line action row
+  (URL field + accent Add-task button) and a side-by-side task-log/activity
+  split inside the queue card; Settings is a two-column card grid; History
+  and its event trail live in one view. All widget contracts used by the
+  regression suite (attributes, variables, hint labels, tree shapes and the
+  `open_library()` handle) are preserved; `ArchiveWindow` is embedded into
+  the Library view via an optional `host` frame while keeping its standalone
+  Toplevel mode.
+
 ## [1.1.0] — 2026-09-18
 
 Hardening phase 10, a composite regression suite, and a WCAG-AA UI theme
