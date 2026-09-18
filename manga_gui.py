@@ -3444,7 +3444,7 @@ class MangaGui:
                 self._events_after_id = self.root.after(100, self.process_events)
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 def main(argv=None):

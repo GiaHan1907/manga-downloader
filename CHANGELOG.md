@@ -4,7 +4,10 @@ All notable changes to Manga Downloader are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] — 2026-09-18
+
+Hardening phase 10, a composite regression suite, and a WCAG-AA UI theme
+overhaul ported from the audited redesign demo.
 
 ### Changed
 - UI theme overhaul ported from the audited redesign demo (`ui_redesign_demo.html`):

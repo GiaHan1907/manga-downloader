@@ -94,13 +94,13 @@ def make_image_bytes() -> bytes:
 # ===========================================================================
 section("Phase 0: packaging / CLI contract")
 
-check("version constant", manga_gui.APP_VERSION == "1.0.0", manga_gui.APP_VERSION)
+check("version constant", manga_gui.APP_VERSION == "1.1.0", manga_gui.APP_VERSION)
 buf = io.StringIO()
 with redirect_stdout(buf):
     code = manga_gui.main(["--version"])
 _real_guard_cls = manga_gui.SingleInstanceGuard
 check("--version exit code", code == 0, str(code))
-check("--version output", buf.getvalue().strip() == "MangaDownloader 1.0.0", buf.getvalue().strip())
+check("--version output", buf.getvalue().strip() == "MangaDownloader 1.1.0", buf.getvalue().strip())
 check("parse_args defaults", downloader.parse_args().timeout == 30)
 check("clean_name fallback", downloader.clean_name("///", "fallback") == "fallback")
 
@@ -577,7 +577,7 @@ new_logs = set(BASE.glob("crash-*.crash.log")) - before_logs
 check("crash log written for main-thread error", len(new_logs) == 1, str(len(new_logs)))
 check("crash log contains error and version",
       new_logs and "suite-fatal-42" in new_logs.pop().read_text(encoding="utf-8")
-      and "version: 1.0.0" in " ".join(p.read_text(encoding="utf-8") for p in BASE.glob("crash-*.crash.log")))
+      and "version: 1.1.0" in " ".join(p.read_text(encoding="utf-8") for p in BASE.glob("crash-*.crash.log")))
 check("fatal toast shown", any(t.winfo_exists() for t in app.toasts))
 check("activity log records crash", "[crash]" in app.log.get("1.0", "end"))
 app.close_all_toasts()
@@ -886,7 +886,7 @@ if exe.exists():
     proc = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=60,
                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     check("exe --version exit", proc.returncode == 0, str(proc.returncode))
-    check("exe --version output", proc.stdout.strip() == "MangaDownloader 1.0.0", proc.stdout.strip())
+    check("exe --version output", proc.stdout.strip() == "MangaDownloader 1.1.0", proc.stdout.strip())
     check("exe exists and sized", exe.stat().st_size > 1_000_000, f"{exe.stat().st_size} bytes")
 else:
     print("  SKIP  frozen-exe checks (dist/MangaDownloader.exe not built in this environment)",
