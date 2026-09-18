@@ -38,13 +38,55 @@ A = tk
 
 _PALETTE: dict[str, str] = {}
 _TREES: list["ThemedTree"] = []
+_STYLE: "ttk.Style | None" = None
+_APPEARANCE_LOCK = False
 
 
-def set_palette(colors: dict[str, str]) -> None:
-    """Feed the resolved theme colors (manga_gui ``self.colors``)."""
+def set_palette(colors: dict[str, str], style: "ttk.Style | None" = None) -> None:
+    """Feed the resolved theme colors (manga_gui ``self.colors``).
+
+    Passing the app's ttk.Style instance lets wrappers read live font,
+    padding and thickness values from the style registry, so density and
+    theme changes configured there flow into the CTk widgets too.
+    """
+    global _STYLE, _APPEARANCE_LOCK
     _PALETTE.clear()
     _PALETTE.update(colors)
+    _STYLE = style
+    if style is not None:
+        try:
+            bg = _PALETTE.get("bg", "#080b12").lstrip("#")
+            try:
+                # Use luminance rather than a hard-coded color list so custom
+                # dark palettes such as the terminal green theme stay dark.
+                luminance = (0.2126 * int(bg[0:2], 16)
+                              + 0.7152 * int(bg[2:4], 16)
+                              + 0.0722 * int(bg[4:6], 16))
+            except (ValueError, IndexError):
+                luminance = 8
+            mode = "Light" if luminance > 150 else "Dark"
+            if not _APPEARANCE_LOCK and ctk.AppearanceModeTracker.appearance_mode != mode:
+                ctk.set_appearance_mode(mode)
+        except Exception:
+            pass
     restyle_trees()
+
+
+def _style_lookup(style_name, option):
+    """Read a live value from the app's ttk style registry (font, padding,
+    thickness...). Falls back to None when no style is registered yet."""
+    if _STYLE is None:
+        return None
+    try:
+        value = _STYLE.lookup(style_name, option)
+        return value if value != "" else None
+    except Exception:
+        return None
+
+
+def _style_font(style_name, default):
+    value = _style_lookup(style_name, "font")
+    return _font(value, default) if value else default
 
 
 def _hex(value, fallback=None):
@@ -74,6 +116,31 @@ def _blend(hex_a: str, hex_b: str, t: float) -> str:
         *(channel(hex_a[i:i + 2], hex_b[i:i + 2]) for i in (0, 2, 4)))
 
 
+def _parse_tkfont(value: str):
+    """Parse a Tk font description string like '{Segoe UI} 24 bold'."""
+    import re
+    value = value.strip()
+    brace = re.match(r"^\{(.+?)\}\s*(.*)$", value)
+    if brace:
+        family, rest = brace.group(1), brace.group(2).split()
+    else:
+        parts = value.split()
+        family, rest = parts[0], parts[1:]
+    size = 13
+    for token in rest:
+        if token.lstrip("-").isdigit():
+            size = int(token)
+            break
+    weight = "bold" if "bold" in rest else "normal"
+    slant = "italic" if "italic" in rest else None
+    font = [family, size]
+    if weight == "bold":
+        font.append("bold")
+    if slant:
+        font.append("italic")
+    return tuple(font)
+
+
 def _font(value, default=("Segoe UI", 13)):
     if value is None:
         return default
@@ -82,6 +149,11 @@ def _font(value, default=("Segoe UI", 13)):
         weight = actual.get("weight", "normal")
         return (actual.get("family", "Segoe UI"), actual.get("size", 13),
                 "bold" if weight == "bold" else "normal")
+    if isinstance(value, str):
+        try:
+            return _parse_tkfont(value)
+        except Exception:
+            return default
     if isinstance(value, (tuple, list)):
         parts = tuple(p for p in value if p)
         return parts if parts else default
@@ -128,10 +200,10 @@ class CompatFrame(_Base, ctk.CTkFrame):
             kw.setdefault("fg_color", _c("card", "#11151f"))
             kw.setdefault("border_width", 1)
             kw.setdefault("border_color", _c("border", "#222b3d"))
-            kw.setdefault("corner_radius", 12)
+            kw.setdefault("corner_radius", 2)
         else:
             kw.setdefault("fg_color", _hex(bg) if bg else _c("bg", "#080b12"))
-            kw.setdefault("corner_radius", 6)
+            kw.setdefault("corner_radius", 2)
         super().__init__(master, **kw)
 
     def configure(self, cnf=None, **kw):
@@ -177,19 +249,24 @@ class CompatLabel(_Base, ctk.CTkLabel):
         kw.pop("justify", None)
         kw.pop("bitmap", None)
         if style:
-            if "Title" in str(style):
-                kw.setdefault("font", ("Segoe UI", 22, "bold"))
-            elif "CardTitle" in str(style):
-                kw.setdefault("font", ("Segoe UI", 12, "bold"))
-            elif "Muted" in str(style):
+            style_str = str(style)
+            if style_str.startswith("Title."):
+                # density-aware: the registry carries 20px (compact) vs 24px
+                kw.setdefault("font", _style_font(style_str, ("Segoe UI", 24, "bold")))
+            elif style_str.startswith("CardTitle."):
+                kw.setdefault("font", _style_font(style_str, ("Segoe UI", 12, "bold")))
+            elif style_str.startswith("Muted."):
                 fg = fg or _c("muted", "#7e89a6")
+            # Subtitle./CardText. fonts flow through the generic registry
+            # lookup at the end of this constructor
         if bg:
             kw.setdefault("fg_color", _hex(bg))
         else:
             kw.setdefault("fg_color", "transparent")
         if fg:
             kw.setdefault("text_color", _hex(fg))
-        kw.setdefault("font", _font(kw.pop("font", None)))
+        font_kw = kw.pop("font", None)
+        kw["font"] = _font(font_kw) if font_kw is not None else _style_font(str(style) if style else "", ("Segoe UI", 13))
         if anchor is not None:
             kw.setdefault("anchor", anchor)
         self._has_var = kw.get("textvariable") is not None
@@ -266,14 +343,31 @@ class CompatButton(_Base, ctk.CTkButton):
         if accent:
             kw.setdefault("fg_color", _c("accent_strong", "#6f52ee"))
             kw.setdefault("hover_color", _c("accent_press", "#5f45d6"))
-            kw.setdefault("text_color", "#ffffff")
+            kw.setdefault("text_color", _hex(fg, "#ffffff"))
+            kw.setdefault("text_color_disabled", _c("muted", "#aab3c7"))
         else:
-            base = _hex(bg) if bg else _blend(_c("text", "#e8eef7"), _c("card", "#11151f"), 0.06)
+            # _blend(a, b, t) keeps (1-t) of a and t of b. Start from the
+            # card surface; the previous argument order made dark-theme
+            # secondary buttons almost white and destroyed text contrast.
+            base = _hex(bg) if bg else _blend(_c("card", "#11151f"), _c("text", "#e8eef7"), 0.06)
             kw.setdefault("fg_color", base)
-            kw.setdefault("hover_color", _blend(_c("text", "#e8eef7"), _c("card", "#11151f"), 0.12))
+            kw.setdefault("hover_color", _blend(_c("card", "#11151f"), _c("text", "#e8eef7"), 0.12))
             kw.setdefault("text_color", _hex(fg, _c("text", "#e8eef7")))
-        kw.setdefault("corner_radius", 10)
-        kw.setdefault("font", _font(kw.pop("font", None), ("Segoe UI", 12, "bold")))
+            kw.setdefault("text_color_disabled", _c("muted", "#aab3c7"))
+        kw.setdefault("corner_radius", 3)
+        font_kw = kw.pop("font", None)
+        style_str = str(style) if style else ""
+        kw["font"] = _font(font_kw) if font_kw is not None else _style_font(style_str, ("Segoe UI", 12, "bold"))
+        pad = _style_lookup(style_str if style_str else "TButton", "padding")
+        if pad:
+            import re
+            digits = re.findall(r"-?\d+", str(pad))
+            if digits:
+                try:
+                    y = int(digits[-1])
+                    kw.setdefault("height", max(30, y * 2 + 12))
+                except ValueError:
+                    pass
         state = kw.pop("state", None)
         if state == "disabled":
             kw["state"] = "disabled"
@@ -348,7 +442,7 @@ class CompatEntry(_Base, ctk.CTkEntry):
         kw.setdefault("fg_color", _c("input", "#101623"))
         kw.setdefault("border_color", _c("border", "#222b3d"))
         kw.setdefault("text_color", _c("text", "#e8eef7"))
-        kw.setdefault("corner_radius", 8)
+        kw.setdefault("corner_radius", 3)
         kw.setdefault("font", _font(kw.pop("font", None)))
         justify = kw.pop("justify", None)
         super().__init__(master, **kw)
@@ -425,7 +519,7 @@ class CompatComboBox(_Base, ctk.CTkComboBox):
         kw.setdefault("dropdown_fg_color", _c("card", "#11151f"))
         kw.setdefault("dropdown_hover_color", _blend(_c("card", "#11151f"), _c("text", "#e8eef7"), 0.10))
         kw.setdefault("dropdown_text_color", _c("text", "#e8eef7"))
-        kw.setdefault("corner_radius", 8)
+        kw.setdefault("corner_radius", 3)
         kw.setdefault("font", _font(kw.pop("font", None)))
         super().__init__(master, **kw)
 
@@ -504,6 +598,7 @@ class CompatCheckbutton(_Base, ctk.CTkCheckBox):
         kw.setdefault("text_color", _c("text", "#e8eef7"))
         kw.setdefault("checkbox_width", 18)
         kw.setdefault("checkbox_height", 18)
+        kw.setdefault("corner_radius", 3)
         kw.setdefault("font", _font(kw.pop("font", None), ("Segoe UI", 12)))
         super().__init__(master, **kw)
 
@@ -545,6 +640,7 @@ class CompatRadiobutton(_Base, ctk.CTkRadioButton):
         kw.setdefault("text_color", _c("text", "#e8eef7"))
         kw.setdefault("radiobutton_width", 18)
         kw.setdefault("radiobutton_height", 18)
+        kw.setdefault("corner_radius", 3)
         kw.setdefault("font", _font(kw.pop("font", None), ("Segoe UI", 12)))
         super().__init__(master, **kw)
 
@@ -577,7 +673,7 @@ class CompatRadiobutton(_Base, ctk.CTkRadioButton):
 
 class CompatProgressbar(_Base, ctk.CTkProgressBar):
     def __init__(self, master=None, **kw):
-        kw.pop("style", None)
+        style_name = str(kw.pop("style", None) or "Horizontal.TProgressbar")
         for dead in ("orient", "length", "takefocus", "cursor"):
             kw.pop(dead, None)
         mode = kw.pop("mode", "determinate")
@@ -585,7 +681,13 @@ class CompatProgressbar(_Base, ctk.CTkProgressBar):
         initial = float(kw.pop("value", 0.0) or 0.0)
         kw.setdefault("progress_color", _c("accent_strong", "#6f52ee"))
         kw.setdefault("fg_color", _c("input", "#101623"))
-        kw.setdefault("corner_radius", 6)
+        kw.setdefault("corner_radius", 2)
+        thickness = _style_lookup(style_name, "thickness")
+        if thickness:
+            try:
+                kw.setdefault("height", int(thickness))
+            except (TypeError, ValueError):
+                pass
         kw.setdefault("height", 10)
         kw.pop("mode", None)
         super().__init__(master, **kw)
@@ -694,14 +796,14 @@ class ThemedTree(ttk.Treeview):
         card = _c("card", "#11151f")
         style = ttk.Style(self)
         style.configure("Compat.Treeview", background=card, fieldbackground=card,
-                        foreground=_c("text", "#e8eef7"), rowheight=34,
+                        foreground=_c("text", "#e8eef7"), rowheight=38,
                         borderwidth=0, relief="flat")
         style.map("Compat.Treeview",
                   background=[("selected", _c("accent_strong", "#6f52ee"))],
                   foreground=[("selected", "#ffffff")])
         style.configure("Compat.Treeview.Heading", background=card,
-                        foreground=_c("muted", "#7e89a6"), relief="flat",
-                        borderwidth=0, font=("Segoe UI", 10, "bold"))
+                        foreground=_c("muted", "#aab3c7"), relief="flat",
+                        borderwidth=0, font=("Segoe UI", 11, "bold"))
         style.map("Compat.Treeview.Heading", background=[("active", card)])
         try:
             self.configure(style="Compat.Treeview")
@@ -766,8 +868,6 @@ def install(module=None) -> None:
 
 
 def apply_window_scaling(root: tk.Tk) -> None:
-    """CTk niceties for the root window (HiDPI awareness, dark default)."""
-    try:
-        ctk.set_appearance_mode("dark")
-    except Exception:
-        pass
+    """Hook for root-window level CTk niceties (kept minimal on purpose:
+    the appearance mode follows the app theme via set_palette)."""
+    return None

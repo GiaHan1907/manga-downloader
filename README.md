@@ -62,10 +62,25 @@ folder, with the `.cbz` file beside that folder.
 The `All chapters` option follows the website's `Next chapter` link until no
 next link is found.
 
-Closing the window hides it in the system tray instead of exiting. Use the tray
-icon menu to show the window again or exit the application. Download history is
-stored locally in `%APPDATA%\MangaDownloader\download_history.json` and keeps
+Closing the window hides it in the system tray instead of exiting. Use the
+tray icon menu to show the window again or exit the application. Download
+history is stored locally in `%APPDATA%\MangaDownloader\download_history.json` and keeps
 the latest 100 records.
+
+### Verify the GUI layout on Windows
+
+Run the layout smoke test from the repository root after launching the project
+environment. It opens Downloader, History, Library, and Settings, records the
+required widget geometry, and saves one screenshot per view when Pillow's
+`ImageGrab` is available:
+
+```powershell
+py tools\check_gui_layout.py --output .relcheck\gui-layout
+```
+
+The generated `layout-report.json` contains missing-control checks and window
+dimensions. Add `--keep-open` when visually comparing the final view with the
+HTML redesign demo.
 
 ## Build a standalone Windows executable
 

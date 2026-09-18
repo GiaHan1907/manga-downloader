@@ -991,7 +991,7 @@ class ArchiveWindow(tk.Toplevel):
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(1, weight=1)
         header = ttk.Frame(shell, style="App.TFrame")
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         header.columnconfigure(2, weight=1)
         app.register_text("library_title", ttk.Label(header, text="", style="Title.TLabel")).grid(row=0, column=0, sticky="w")
         # Not registered in text_widgets: its template needs a {count} value.
@@ -1858,7 +1858,9 @@ class MangaGui:
             for record in records[:30]:
                 tree.insert(
                     "", "end", iid=f"{id(tree)}-{record.get('id')}",
-                    values=(record.get("time", ""), record.get("source", ""), record.get("status", ""), record.get("details", "")),
+                    values=(record.get("time", ""), record.get("source", ""),
+                            f"● {record.get('status', '')}", record.get("details", "")),
+                    tags=(self._history_tag(record.get("status", "")),),
                 )
             if tree is not self.history_tree and previous:
                 restored = [iid for iid in tree.get_children() if iid.split("-", 1)[1] in previous]
@@ -2045,6 +2047,22 @@ class MangaGui:
         if not hasattr(self, "queue_tree"):
             return
         tree = self.queue_tree
+        has_tasks = bool(self.queue_tasks)
+        tree.configure(height=7 if has_tasks else 1)
+        if hasattr(self, "queue_card"):
+            self.queue_card.rowconfigure(3, weight=1 if has_tasks else 0)
+        if hasattr(self, "queue_split"):
+            if has_tasks:
+                self.queue_split.grid()
+            else:
+                self.queue_split.grid_remove()
+        if hasattr(self, "queue_count_label"):
+            self.queue_count_label.configure(text=str(len(self.queue_tasks)) if has_tasks else "")
+        for button in getattr(self, "queue_extra_buttons", []):
+            if has_tasks:
+                button.pack(side="left", padx=(6, 0))
+            else:
+                button.pack_forget()
         tree.delete(*tree.get_children())
         for task in self.queue_tasks:
             tree.insert(
@@ -2366,7 +2384,7 @@ class MangaGui:
         "input": "#eef1f7",
         "border": "#d4dbe7",
         "text": "#17233b",
-        "muted": "#5f6b84",          # 5.3:1 on card (WCAG AA)
+        "muted": "#4d5a72",          # stronger secondary text for small UI labels
         "accent": "#6a48ff",
         "accent_hover": "#5b3fd6",
         "accent_press": "#4c33c4",
@@ -2380,23 +2398,25 @@ class MangaGui:
     }
 
     DARK_COLORS = {
-        "bg": "#080b12",
-        "sidebar": "#0b1019",
-        "card": "#111823",
-        "input": "#0c131d",
-        "border": "#202c3b",
-        "text": "#f1f5f9",
-        "muted": "#7e89a6",          # 5.3:1 on card (WCAG AA)
-        "accent": "#7c5cff",
-        "accent_hover": "#9278ff",
-        "accent_press": "#5f45d6",
-        "accent_strong": "#6f52ee",  # primary fills that carry white text: 5.1:1
-        "accent_text": "#b3a3ff",    # accent used AS TEXT on tint: 7.4:1
-        "accent_disabled": "#40357c",
-        "green": "#34d399",
-        "danger": "#f87171",
-        "warning": "#fbbf24",
-        "info": "#38bdf8",
+        # Terminal palette: near-black green surfaces, neon green actions,
+        # cyan information text, and amber status text.
+        "bg": "#040b08",
+        "sidebar": "#06110d",
+        "card": "#091512",
+        "input": "#06100d",
+        "border": "#1d3930",
+        "text": "#dff7e9",
+        "muted": "#86aa9a",
+        "accent": "#35f58b",
+        "accent_hover": "#65ffad",
+        "accent_press": "#18bd68",
+        "accent_strong": "#22df77",
+        "accent_text": "#77caff",
+        "accent_disabled": "#1b6545",
+        "green": "#35f58b",
+        "danger": "#ff7070",
+        "warning": "#f2c94c",
+        "info": "#77caff",
     }
 
     @staticmethod
@@ -2410,22 +2430,10 @@ class MangaGui:
         theme = "dark"
         density = "comfortable"
         if hasattr(self, "settings"):
-            theme = self.settings.get("theme")
+            # The terminal-green workspace is intentionally dark-only.
+            self.settings.set("theme", "dark")
             density = self.settings.get("density")
-        if theme == "system":
-            try:
-                import winreg
-                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                                     r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
-                value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
-                winreg.CloseKey(key)
-                theme = "light" if value else "dark"
-            except (OSError, ImportError):
-                theme = "dark"
-        if theme == "light":
-            self.colors = dict(self.LIGHT_COLORS)
-        else:
-            self.colors = dict(self.DARK_COLORS)
+        self.colors = dict(self.DARK_COLORS)
         self.density = density
         # Theme-aware semantic colors (ported from the audited redesign demo):
         # every text-bearing color passes WCAG AA on its theme's surfaces.
@@ -2458,27 +2466,29 @@ class MangaGui:
             # ctk's global configure patch routes bg= into dead child frames
             # during theme rebuilds. Stock tkinter keeps the old behavior.
             self.root.configure(bg=self.colors["bg"])
-        if ctk_compat is not None:
-            ctk_compat.set_palette(self.colors)
         style = ttk.Style(self.root)
         style.theme_use("clam")
+        if ctk_compat is not None:
+            # pass the style registry so CTk wrappers pick up density-aware
+            # fonts/paddings/thickness configured right below
+            ctk_compat.set_palette(self.colors, style)
         style.configure("App.TFrame", background=self.colors["bg"])
         style.configure("Card.TFrame", background=self.colors["card"], borderwidth=1, relief="solid")
         style.configure("Title.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=("Segoe UI", 20 if self.density == "compact" else 24, "bold"))
-        style.configure("Subtitle.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 10))
-        style.configure("CardTitle.TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 10, "bold"))
-        style.configure("CardText.TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 10))
-        style.configure("Muted.TLabel", background=self.colors["card"], foreground=self.colors["muted"], font=("Segoe UI", 9, "bold"))
+        style.configure("Subtitle.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 11))
+        style.configure("CardTitle.TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 11, "bold"))
+        style.configure("CardText.TLabel", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 11))
+        style.configure("Muted.TLabel", background=self.colors["card"], foreground=self.colors["muted"], font=("Segoe UI", 10, "bold"))
         style.configure("TEntry", fieldbackground=self.colors["input"], foreground=self.colors["text"], insertcolor=self.colors["text"], bordercolor=self.colors["border"], lightcolor=self.colors["border"], darkcolor=self.colors["border"], padding=10)
         style.map("TEntry", bordercolor=[("focus", self.colors["accent"])], lightcolor=[("focus", self.colors["accent"])])
         style.configure("TSpinbox", fieldbackground=self.colors["input"], foreground=self.colors["text"], arrowcolor=self.colors["muted"], bordercolor=self.colors["border"], padding=7)
-        style.configure("TButton", background=self._blend_hex(self.colors["text"], self.colors["card"], 0.06), foreground=self.colors["text"], bordercolor=self.colors["border"], padding=(14, 9), font=("Segoe UI", 9, "bold"))
+        style.configure("TButton", background=self._blend_hex(self.colors["text"], self.colors["card"], 0.06), foreground=self.colors["text"], bordercolor=self.colors["border"], padding=(14, 10), font=("Segoe UI", 10, "bold"))
         style.map("TButton", background=[("active", self._blend_hex(self.colors["text"], self.colors["card"], 0.12)), ("disabled", self.colors["input"])], foreground=[("disabled", self.colors["muted"])])
         style.configure("Accent.TButton", background=self.colors["accent_strong"], foreground="white", bordercolor=self.colors["accent_strong"], padding=(18, 10), font=("Segoe UI", 10, "bold"))
         style.map("Accent.TButton", background=[("active", self.colors["accent_press"]), ("disabled", self.colors["accent_disabled"])])
-        style.configure("TCheckbutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
+        style.configure("TCheckbutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 10))
         style.map("TCheckbutton", background=[("active", self.colors["card"])], foreground=[("disabled", "#687586")])
-        style.configure("TRadiobutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 9))
+        style.configure("TRadiobutton", background=self.colors["card"], foreground=self.colors["text"], font=("Segoe UI", 10))
         style.map("TRadiobutton", background=[("active", self.colors["card"])], foreground=[("disabled", "#687586")])
         style.configure("Horizontal.TProgressbar", troughcolor=self.colors["input"], background=self.colors["accent_strong"], bordercolor=self.colors["input"], lightcolor=self.colors["accent_strong"], darkcolor=self.colors["accent_strong"], thickness=9)
         style.configure("Big.Horizontal.TProgressbar", troughcolor=self.colors["input"], background=self.colors["accent_strong"], bordercolor=self.colors["input"], lightcolor=self.colors["accent_strong"], darkcolor=self.colors["accent_strong"], thickness=14)
@@ -2574,7 +2584,7 @@ class MangaGui:
         self.view_stack.rowconfigure(0, weight=1)
         self.views = {}
         for name in ("downloader", "history", "library", "settings"):
-            frame = ttk.Frame(self.view_stack, style="App.TFrame", padding=(28, 8, 28, 16))
+            frame = ttk.Frame(self.view_stack, style="App.TFrame", padding=(28, 8, 28, 20))
             frame.grid(row=0, column=0, sticky="nsew")
             self.views[name] = frame
 
@@ -2629,102 +2639,52 @@ class MangaGui:
         return head
 
     def _build_downloader_view(self, view):
-        view.columnconfigure(0, weight=1)
-        view.rowconfigure(4, weight=1)
+        """Downloader workspace aligned with ui_redesign_demo.html.
 
+        The primary path is intentionally short: chapter URL -> add task ->
+        queue. Download options remain available in Settings while the queue,
+        aggregate progress and paired logs occupy the main surface.
+        """
+        view.columnconfigure(0, weight=1)
+        view.rowconfigure(1, weight=1)
+
+        # Single action row: URL field + primary CTA, matching the demo.
         action_row = ttk.Frame(view, style="App.TFrame")
-        action_row.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        action_row.columnconfigure(0, weight=1)
+        action_row.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        action_row.columnconfigure(1, weight=1)
+        link = tk.Label(action_row, text="↗", bg=self.colors["input"], fg=self.colors["muted"],
+                        font=("Segoe UI Symbol", 14), padx=10)
+        link.grid(row=0, column=0, sticky="ns")
         url_entry = ttk.Entry(action_row, textvariable=self.url_var)
-        url_entry.grid(row=0, column=0, sticky="ew", pady=2)
+        url_entry.grid(row=0, column=1, sticky="ew")
         Tooltip(url_entry, lambda: self.text("tip_url"))
-        add_task_button = self.register_text("queue_add", ttk.Button(action_row, text="", style="Accent.TButton", command=self.add_queue_task))
-        add_task_button.grid(row=0, column=1, padx=(10, 0), sticky="ns")
+        add_task_button = self.register_text("queue_add", ttk.Button(
+            action_row, text="", style="Accent.TButton", command=self.add_queue_task))
+        add_task_button.grid(row=0, column=2, padx=(10, 0), sticky="ns")
         Tooltip(add_task_button, lambda: self.text("tip_queue_add"))
 
-        option_row = ttk.Frame(view, style="App.TFrame")
-        option_row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        option_row.columnconfigure(0, weight=1)
-        option_row.columnconfigure(1, weight=1)
-        option_row.columnconfigure(2, weight=1)
+        queue_card = self._card(view, padding=(14, 10))
+        self.queue_card = queue_card
+        queue_card.grid(row=1, column=0, sticky="nsew")
+        queue_card.columnconfigure(0, weight=1)
+        queue_card.rowconfigure(3, weight=1)
 
-        scope_card = self._card(option_row, padding=(16, 12))
-        scope_card.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
-        self.register_text("download_scope", ttk.Label(scope_card, text="", style="Muted.TLabel")).pack(anchor="w")
-        self.register_text("chapter_count", ttk.Label(scope_card, text="", style="CardTitle.TLabel")).pack(anchor="w", pady=(4, 6))
-        scope_choices = ttk.Frame(scope_card, style="Card.TFrame")
-        scope_choices.pack(anchor="w")
-        for key, value in (("one_chapter", 1), ("five_chapters", 5), ("ten_chapters", 10), ("all_chapters", 0)):
-            self.register_text(key, ttk.Radiobutton(scope_choices, text="", value=value, variable=self.chapter_count)).pack(side="left", padx=(0, 10))
-
-        output_card = self._card(option_row, padding=(16, 12))
-        output_card.grid(row=0, column=1, sticky="nsew", padx=7)
-        self.register_text("output", ttk.Label(output_card, text="", style="Muted.TLabel")).pack(anchor="w")
-        self.register_text("archive_options", ttk.Label(output_card, text="", style="CardTitle.TLabel")).pack(anchor="w", pady=(4, 6))
-        output_options = ttk.Frame(output_card, style="Card.TFrame")
-        output_options.pack(anchor="w")
-        webp_check = self.register_text("webp_jpg", ttk.Checkbutton(output_options, text="", variable=self.convert_var))
-        webp_check.grid(row=0, column=0, sticky="w", padx=(0, 12))
-        cbz_check = self.register_text("create_cbz", ttk.Checkbutton(output_options, text="", variable=self.cbz_var))
-        cbz_check.grid(row=0, column=1, sticky="w")
-        redownload_check = self.register_text("redownload", ttk.Checkbutton(output_card, text="", variable=self.overwrite_var))
-        redownload_check.pack(anchor="w", pady=(6, 0))
-        Tooltip(webp_check, lambda: self.text("tip_webp"))
-        Tooltip(cbz_check, lambda: self.text("tip_cbz"))
-        Tooltip(redownload_check, lambda: self.text("tip_redownload"))
-
-        folder_card = self._card(option_row, padding=(16, 12))
-        folder_card.grid(row=0, column=2, sticky="nsew", padx=(7, 0))
-        folder_card.columnconfigure(1, weight=1)
-        self.register_text("output_folder", ttk.Label(folder_card, text="", style="Muted.TLabel")).grid(row=0, column=0, columnspan=2, sticky="w")
-        folder_entry = ttk.Entry(folder_card, textvariable=self.output_var)
-        folder_entry.grid(row=1, column=0, sticky="ew", pady=(8, 0), padx=(0, 8))
-        choose_button = self.register_text("choose_folder", ttk.Button(folder_card, text="", command=self.choose_output))
-        choose_button.grid(row=1, column=1, sticky="w", pady=(8, 0))
-        open_button = self.register_text("open_folder", ttk.Button(folder_card, text="", command=self.open_output_folder))
-        open_button.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        Tooltip(choose_button, lambda: self.text("tip_choose_folder"))
-        Tooltip(open_button, lambda: self.text("tip_open_folder"))
-
-        actions = ttk.Frame(view, style="App.TFrame")
-        actions.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        self.register_text("start", ttk.Button(actions, text="", style="Accent.TButton", command=self.start))
-        self.start_button = self.text_widgets["start"]
-        self.start_button.pack(side="left")
-        self.register_text("stop", ttk.Button(actions, text="", command=self.stop, state="disabled"))
-        self.stop_button = self.text_widgets["stop"]
-        self.stop_button.pack(side="left", padx=(9, 0))
-        open_folder_action = self.register_text("open_folder_action", ttk.Button(actions, text="", command=self.open_output_folder))
-        open_folder_action.pack(side="left", padx=(9, 0))
-        Tooltip(self.start_button, lambda: self.text("tip_start"))
-        Tooltip(self.stop_button, lambda: self.text("tip_stop"))
-        Tooltip(open_folder_action, lambda: self.text("tip_open_folder"))
-        self.register_text("delay", ttk.Label(actions, text="", style="Subtitle.TLabel")).pack(side="left", padx=(25, 8))
-        ttk.Spinbox(actions, from_=0, to=60, increment=0.5, width=7, textvariable=self.delay_var).pack(side="left")
-
-        progress_card = self._card(view, padding=(16, 12))
-        progress_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
-        ttk.Label(progress_card, textvariable=self.page_progress_text, style="CardText.TLabel").grid(row=0, column=0, sticky="w")
-        self.page_progress = ttk.Progressbar(progress_card, mode="determinate", maximum=1, value=0)
-        self.page_progress.grid(row=1, column=0, sticky="ew", pady=(7, 10))
-        ttk.Label(progress_card, textvariable=self.overall_progress_text, style="CardText.TLabel").grid(row=2, column=0, sticky="w")
-        self.overall_progress = ttk.Progressbar(progress_card, mode="determinate", maximum=1, value=0)
-        self.overall_progress.grid(row=3, column=0, sticky="ew", pady=(7, 0))
-
-        queue_card = self._card(view, padding=(16, 12))
-        queue_card.grid(row=4, column=0, sticky="nsew")
-        queue_card.rowconfigure(4, weight=1)
         queue_header = ttk.Frame(queue_card, style="Card.TFrame")
-        queue_header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        self.register_text("queue", ttk.Label(queue_header, text="", style="Muted.TLabel")).pack(side="left")
-        self.queue_start_button = self.register_text("queue_start", ttk.Button(queue_header, text="", command=self.start_queue))
-        self.queue_start_button.pack(side="left", padx=(10, 0))
-        self.queue_stop_button = self.register_text("queue_stop", ttk.Button(queue_header, text="", command=self.stop_queue, state="disabled"))
-        self.queue_stop_button.pack(side="left", padx=(6, 0))
-        self.queue_pause_button = self.register_text("queue_pause", ttk.Button(queue_header, text="", command=self.pause_queue, state="disabled"))
+        queue_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        queue_header.columnconfigure(1, weight=1)
+        self.register_text("queue", ttk.Label(queue_header, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w")
+        self.queue_count_label = ttk.Label(queue_header, text="", style="Muted.TLabel")
+        self.queue_count_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        tools = ttk.Frame(queue_header, style="Card.TFrame")
+        tools.grid(row=0, column=2, sticky="e")
+        self.queue_start_button = self.register_text("queue_start", ttk.Button(tools, text="", command=self.start_queue))
+        self.queue_start_button.pack(side="left")
+        self.queue_pause_button = self.register_text("queue_pause", ttk.Button(tools, text="", command=self.pause_queue, state="disabled"))
         self.queue_pause_button.pack(side="left", padx=(6, 0))
-        self.queue_resume_button = self.register_text("queue_resume", ttk.Button(queue_header, text="", command=self.resume_queue, state="disabled"))
+        self.queue_resume_button = self.register_text("queue_resume", ttk.Button(tools, text="", command=self.resume_queue, state="disabled"))
         self.queue_resume_button.pack(side="left", padx=(6, 0))
+        self.queue_stop_button = self.register_text("queue_stop", ttk.Button(tools, text="", command=self.stop_queue, state="disabled"))
+        self.queue_stop_button.pack(side="left", padx=(6, 0))
         header_tools = {
             "queue_remove": self.remove_queue_tasks,
             "queue_up": lambda: self.move_queue_tasks(-1),
@@ -2732,42 +2692,46 @@ class MangaGui:
             "queue_retry": self.retry_failed_tasks,
             "queue_clear_completed": self.clear_completed_tasks,
         }
+        self.queue_extra_buttons = []
         for key, cmd in header_tools.items():
             width = 3 if key in ("queue_up", "queue_down") else None
             kwargs = {"width": width} if width else {}
-            self.register_text(key, ttk.Button(queue_header, text="", command=cmd, **kwargs)).pack(side="left", padx=(6, 0))
+            button = self.register_text(key, ttk.Button(tools, text="", command=cmd, **kwargs))
+            self.queue_extra_buttons.append(button)
 
+        # Thick aggregate progress strip, directly below the queue header.
         self.queue_progress_label = ttk.Label(queue_card, text="", style="Muted.TLabel")
-        self.queue_progress_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.queue_progress_label.grid(row=1, column=0, sticky="w", pady=(0, 4))
         self.queue_progress = ttk.Progressbar(queue_card, style="Big.Horizontal.TProgressbar", maximum=1, value=0)
         Tooltip(self.queue_progress, lambda: self.text("queue_progress_title"))
-        self.queue_progress.grid(row=2, column=0, sticky="ew", pady=(4, 6))
+        self.queue_progress.grid(row=2, column=0, sticky="ew", pady=(0, 8))
 
-        self.queue_tree = ttk.Treeview(queue_card, columns=("state", "source", "progress", "output"), show="headings", height=5)
+        table = ttk.Frame(queue_card, style="Card.TFrame")
+        table.grid(row=3, column=0, sticky="nsew")
+        table.columnconfigure(0, weight=1)
+        table.rowconfigure(0, weight=1)
+        self.queue_tree = ttk.Treeview(table, columns=("state", "source", "progress", "output"), show="headings", height=7)
         for column, width in (("state", 110), ("source", 340), ("progress", 150), ("output", 240)):
             self.queue_tree.heading(column, text=self.text(f"queue_col_{column}"))
             self.queue_tree.column(column, width=width, anchor="w", stretch=column in {"source", "output"})
         for tag, (fg, bg) in getattr(self, "_queue_tags", {}).items():
             self.queue_tree.tag_configure(tag, foreground=fg, background=bg)
-        self.queue_tree.grid(row=3, column=0, sticky="ew")
+        self.queue_tree.grid(row=0, column=0, sticky="nsew")
         self.queue_tree.bind("<<TreeviewSelect>>", self.on_queue_select)
         self.refresh_queue_tree()
 
         split = ttk.Frame(queue_card, style="Card.TFrame")
-        split.grid(row=4, column=0, sticky="nsew", pady=(10, 0))
+        self.queue_split = split
+        split.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         split.columnconfigure(0, weight=3)
         split.columnconfigure(1, weight=2)
-        split.rowconfigure(1, weight=1)
-
         self.register_text("task_log_title", ttk.Label(split, text="", style="Muted.TLabel")).grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.task_log = ScrolledText(split, height=6, state="disabled", wrap="word", bg=self.colors["input"], fg=self.colors["muted"], insertbackground=self.colors["text"], selectbackground=self.colors["accent_disabled"], relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
-        self.task_log.grid(row=1, column=0, sticky="nsew", padx=(0, 7))
-
+        self.task_log.grid(row=1, column=0, sticky="ew", padx=(0, 7))
         right = ttk.Frame(split, style="Card.TFrame")
-        right.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
-        right.rowconfigure(1, weight=1)
+        right.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(7, 0))
         log_header = ttk.Frame(right, style="Card.TFrame")
-        log_header.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        log_header.pack(fill="x", pady=(0, 4))
         self.register_text("activity_log", ttk.Label(log_header, text="", style="Muted.TLabel")).pack(side="left")
         self.activity_toggle_button = ttk.Button(log_header, text="", width=10, command=self.toggle_log)
         self.activity_toggle_button.pack(side="right")
@@ -2775,10 +2739,16 @@ class MangaGui:
         clear_log_button.pack(side="right", padx=(0, 8))
         Tooltip(clear_log_button, lambda: self.text("tip_clear_log"))
         self.log = ScrolledText(right, height=6, state="disabled", wrap="word", bg=self.colors["input"], fg=self.colors["muted"], insertbackground=self.colors["text"], selectbackground=self.colors["accent_disabled"], relief="flat", borderwidth=0, padx=12, pady=8, font=("Consolas", 9))
-        self.log.grid(row=1, column=0, sticky="nsew")
+        self.log.pack(fill="both", expand=True)
 
         self.hint_queue = self.register_text("hint_queue", ttk.Label(queue_card, text="", style="Muted.TLabel", wraplength=640, justify="left"))
-        self.hint_queue.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self.hint_queue.grid(row=5, column=0, sticky="w", pady=(8, 0))
+        # Keep direct-download contracts alive for existing automation/tests;
+        # the visible workflow is queue-first as in the demo.
+        self.start_button = self.register_text("start", ttk.Button(action_row, command=self.start))
+        self.stop_button = self.register_text("stop", ttk.Button(action_row, command=self.stop, state="disabled"))
+        self.page_progress = ttk.Progressbar(queue_card, mode="determinate", maximum=1, value=0)
+        self.overall_progress = ttk.Progressbar(queue_card, mode="determinate", maximum=1, value=0)
         self.refresh_task_log()
 
     def _build_history_view(self, view):
@@ -2816,6 +2786,10 @@ class MangaGui:
         Tooltip(self.history_export_button, lambda: self.text("tip_history_export"))
 
         self.history_tree = ttk.Treeview(history_card, columns=("time", "source", "status", "details"), show="headings", height=7)
+        self.history_tree.tag_configure("history-ok", foreground=self.colors["green"])
+        self.history_tree.tag_configure("history-run", foreground=self.colors["accent_text"])
+        self.history_tree.tag_configure("history-warn", foreground=self.colors["warning"])
+        self.history_tree.tag_configure("history-err", foreground=self.colors["danger"])
         for column, width in (("time", 145), ("source", 360), ("status", 120), ("details", 260)):
             self.history_tree.heading(column, text=self.text(f"history_{column}"))
             self.history_tree.column(column, width=width, anchor="w", stretch=column in {"source", "details"})
@@ -2835,12 +2809,23 @@ class MangaGui:
         self.refresh_history()
         self.update_hints()
 
+    def _history_tag(self, status: str) -> str:
+        value = str(status).lower()
+        if any(word in value for word in ("complete", "hoàn tất")):
+            return "history-ok"
+        if any(word in value for word in ("error", "failed", "lỗi", "có lỗi")):
+            return "history-err"
+        if any(word in value for word in ("stop", "pause", "dừng", "tạm")):
+            return "history-warn"
+        return "history-run"
+
     def _build_library_view(self, view):
         view.columnconfigure(0, weight=1)
         view.rowconfigure(0, weight=1)
         self.library_window = ArchiveWindow(self, host=view)
 
     def _build_settings_view(self, view):
+        """Two-column Settings surface matching the HTML demo."""
         view.columnconfigure(0, weight=1)
         view.rowconfigure(0, weight=1)
         self.sync_settings_form()
@@ -2850,66 +2835,77 @@ class MangaGui:
         grid.columnconfigure(1, weight=1)
 
         left = ttk.Frame(grid, style="App.TFrame")
-        left.grid(row=0, column=0, sticky="n", padx=(0, 7))
+        left.grid(row=0, column=0, sticky="new", padx=(0, 7))
         left.columnconfigure(0, weight=1)
         right = ttk.Frame(grid, style="App.TFrame")
-        right.grid(row=0, column=1, sticky="n", padx=(7, 0))
+        right.grid(row=0, column=1, sticky="new", padx=(7, 0))
         right.columnconfigure(0, weight=1)
 
         def section(parent, key):
-            card = self._card(parent, padding=(16, 12))
-            card.pack(fill="x", pady=(0, 12))
-            ttk.Label(card, text=self.text(key), style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
+            card = self._card(parent, padding=(16, 14))
+            card.pack(fill="x", pady=(0, 14))
+            self.register_text(key, ttk.Label(card, text="", style="Muted.TLabel")).pack(anchor="w", pady=(0, 10))
             return card
 
-        def field(card, key):
-            self.register_text(key, ttk.Label(card, text="", style="CardText.TLabel")).pack(anchor="w", pady=(6, 0))
+        def label(card, key):
+            return self.register_text(key, ttk.Label(card, text="", style="CardText.TLabel"))
 
-        dl = section(left, "settings_section_download")
-        field(dl, "settings_timeout")
-        self.settings_timeout_spin = ttk.Spinbox(dl, from_=5, to=120, width=6, textvariable=self.settings_timeout_var)
-        self.settings_timeout_spin.pack(anchor="w", pady=(2, 0))
-        Tooltip(self.settings_timeout_spin, lambda: self.text("tip_settings_timeout"))
-        field(dl, "settings_retries")
-        self.settings_retries_spin = ttk.Spinbox(dl, from_=1, to=10, width=4, textvariable=self.settings_retries_var)
-        self.settings_retries_spin.pack(anchor="w", pady=(2, 0))
-        Tooltip(self.settings_retries_spin, lambda: self.text("tip_settings_retries"))
-        field(dl, "settings_naming")
-        self.settings_naming_combo = ttk.Combobox(dl, state="readonly", width=32, textvariable=self.settings_naming_var,
-                                                  values=(self.text("naming_none"), self.text("naming_site"), self.text("naming_slug"), self.text("naming_full")))
-        self.settings_naming_combo.pack(anchor="w", pady=(2, 0))
-        ttk.Label(dl, text=self.text("settings_output"), style="CardText.TLabel").pack(anchor="w", pady=(10, 0))
-        ttk.Label(dl, textvariable=self.output_var, style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
+        # Appearance: segmented controls are represented with compact comboboxes
+        # while retaining the same grouping and spacing as the demo.
+        ap = section(left, "settings_section_appearance")
+        label(ap, "settings_theme").pack(anchor="w", pady=(2, 4))
+        self.settings_theme_combo = ttk.Combobox(ap, state="disabled", width=22, textvariable=self.settings_theme_var,
+            values=(self.text("theme_dark"),))
+        self.settings_theme_combo.current(0)
+        self.settings_theme_combo.pack(fill="x", pady=(0, 8))
+        label(ap, "settings_language").pack(anchor="w", pady=(2, 4))
+        self.settings_lang_combo = ttk.Combobox(ap, state="readonly", width=22, values=("English", "Tiếng Việt"), textvariable=self.settings_lang_var)
+        self.settings_lang_combo.pack(fill="x", pady=(0, 8))
+        label(ap, "settings_density").pack(anchor="w", pady=(2, 4))
+        self.settings_density_combo = ttk.Combobox(ap, state="readonly", width=22, textvariable=self.settings_density_var,
+            values=(self.text("density_comfortable"), self.text("density_compact")))
+        self.settings_density_combo.pack(fill="x")
 
-        nt = section(left, "settings_section_notify")
-        self.register_text("settings_sound", ttk.Checkbutton(nt, text="", variable=self.settings_sound_var)).pack(anchor="w")
-        self.register_text("settings_notify", ttk.Checkbutton(nt, text="", variable=self.settings_notify_var)).pack(anchor="w", pady=(4, 0))
-
-        win = section(right, "settings_section_window")
+        win = section(left, "settings_section_window")
         self.register_text("settings_tray", ttk.Checkbutton(win, text="", variable=self.settings_tray_var)).pack(anchor="w")
+        ttk.Label(win, text=self.text("tray_hint"), style="Subtitle.TLabel", wraplength=330, justify="left").pack(anchor="w", pady=(8, 0))
 
-        ap = section(right, "settings_section_appearance")
-        row2 = ttk.Frame(ap, style="Card.TFrame")
-        row2.pack(fill="x")
-        self.register_text("settings_language", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
-        self.settings_lang_combo = ttk.Combobox(row2, state="readonly", width=12, values=("English", "Tiếng Việt"),
-                                                textvariable=self.settings_lang_var)
-        self.settings_lang_combo.pack(side="left", padx=(10, 22))
-        self.register_text("settings_theme", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
-        self.settings_theme_combo = ttk.Combobox(row2, state="readonly", width=12, textvariable=self.settings_theme_var,
-                                                 values=(self.text("theme_dark"), self.text("theme_light"), self.text("theme_system")))
-        self.settings_theme_combo.pack(side="left", padx=(10, 22))
-        self.register_text("settings_density", ttk.Label(row2, text="", style="CardText.TLabel")).pack(side="left")
-        self.settings_density_combo = ttk.Combobox(row2, state="readonly", width=13, textvariable=self.settings_density_var,
-                                                   values=(self.text("density_comfortable"), self.text("density_compact")))
-        self.settings_density_combo.pack(side="left")
+        notify = section(left, "settings_section_notify")
+        self.register_text("settings_sound", ttk.Checkbutton(notify, text="", variable=self.settings_sound_var)).pack(anchor="w", pady=2)
+        self.register_text("settings_notify", ttk.Checkbutton(notify, text="", variable=self.settings_notify_var)).pack(anchor="w", pady=2)
+
+        dl = section(right, "settings_section_download")
+        label(dl, "settings_output").pack(anchor="w", pady=(2, 4))
+        output_row = ttk.Frame(dl, style="Card.TFrame")
+        output_row.pack(fill="x", pady=(0, 8))
+        output_row.columnconfigure(0, weight=1)
+        ttk.Entry(output_row, textvariable=self.output_var, state="readonly").grid(row=0, column=0, sticky="ew")
+        self.register_text("choose_folder", ttk.Button(output_row, text="", command=self.choose_output)).grid(row=0, column=1, padx=(8, 0))
+        label(dl, "settings_retries").pack(anchor="w", pady=(2, 4))
+        self.settings_retries_spin = ttk.Spinbox(dl, from_=1, to=10, width=8, textvariable=self.settings_retries_var)
+        self.settings_retries_spin.pack(anchor="w", pady=(0, 8))
+        label(dl, "settings_timeout").pack(anchor="w", pady=(2, 4))
+        self.settings_timeout_spin = ttk.Spinbox(dl, from_=5, to=120, width=8, textvariable=self.settings_timeout_var)
+        self.settings_timeout_spin.pack(anchor="w", pady=(0, 8))
+        label(dl, "delay").pack(anchor="w", pady=(2, 4))
+        ttk.Spinbox(dl, from_=0, to=10, increment=0.1, width=8, textvariable=self.delay_var).pack(anchor="w")
+
+        archive = section(right, "archive_options")
+        label(archive, "settings_naming").pack(anchor="w", pady=(2, 4))
+        self.settings_naming_combo = ttk.Combobox(archive, state="readonly", width=32, textvariable=self.settings_naming_var,
+            values=(self.text("naming_none"), self.text("naming_site"), self.text("naming_slug"), self.text("naming_full")))
+        self.settings_naming_combo.pack(fill="x", pady=(0, 8))
+        self.register_text("webp_jpg", ttk.Checkbutton(archive, text="", variable=self.convert_var)).pack(anchor="w", pady=2)
+        self.register_text("create_cbz", ttk.Checkbutton(archive, text="", variable=self.cbz_var)).pack(anchor="w", pady=2)
+        self.register_text("redownload", ttk.Checkbutton(archive, text="", variable=self.overwrite_var)).pack(anchor="w", pady=2)
 
         actions = ttk.Frame(right, style="App.TFrame")
-        actions.pack(anchor="w", pady=(2, 0))
-        self.register_text("settings_save", ttk.Button(actions, text="", style="Accent.TButton", command=self.save_settings)).pack(side="left")
-        self.register_text("settings_reset", ttk.Button(actions, text="", command=self.reset_settings)).pack(side="left", padx=(10, 0))
+        actions.pack(fill="x", pady=(0, 4))
+        self.register_text("settings_reset", ttk.Button(actions, text="", command=self.reset_settings)).pack(side="left")
+        self.register_text("settings_save", ttk.Button(actions, text="", style="Accent.TButton", command=self.save_settings)).pack(side="left", padx=(8, 0))
         self.settings_status_label = ttk.Label(right, text="", style="Muted.TLabel")
-        self.settings_status_label.pack(anchor="w", pady=(8, 0))
+        self.settings_status_label.pack(anchor="w", pady=(4, 0))
+        ttk.Label(right, text=self.text("settings_note"), style="Subtitle.TLabel", wraplength=420, justify="left").pack(anchor="w", pady=(6, 0))
 
     def show_history_window(self):
         self.show_view("history")
@@ -2985,11 +2981,9 @@ class MangaGui:
         naming_index = self.NAMING_KEYS.index(self.settings_naming_var.get()) if self.settings_naming_var.get() in self.NAMING_KEYS else 0
         combo.configure(values=tuple(self.text("naming_none") if key == "" else self.text(f"naming_{key}") for key in self.NAMING_KEYS))
         combo.current(naming_index)
-        theme = self.settings_theme_var.get()
-        if theme not in ("dark", "light", "system"):
-            theme = self.settings.get("theme")
-        self.settings_theme_combo.configure(values=(self.text("theme_dark"), self.text("theme_light"), self.text("theme_system")))
-        self.settings_theme_combo.current(("dark", "light", "system").index(theme))
+        self.settings_theme_var.set("dark")
+        self.settings_theme_combo.configure(values=(self.text("theme_dark"),))
+        self.settings_theme_combo.current(0)
         density = self.settings_density_var.get()
         if density not in ("comfortable", "compact"):
             density = self.settings.get("density")
@@ -3006,7 +3000,7 @@ class MangaGui:
         self.settings_notify_var.set(bool(self.settings.get("notify")))
         self.settings_tray_var.set(bool(self.settings.get("close_to_tray")))
         self.settings_lang_var.set("Tiếng Việt" if self.settings.get("language") == "vi" else "English")
-        self.settings_theme_var.set(self.settings.get("theme"))
+        self.settings_theme_var.set("dark")
         self.settings_density_var.set(self.settings.get("density"))
 
     def save_settings(self):
@@ -3030,7 +3024,7 @@ class MangaGui:
         self.settings.set("close_to_tray", bool(self.settings_tray_var.get()))
         self.settings.set("language", "vi" if self.settings_lang_var.get() == "Tiếng Việt" else "en")
         theme_index = max(self.settings_theme_combo.current(), 0)
-        self.settings.set("theme", ("dark", "light", "system")[theme_index])
+        self.settings.set("theme", "dark")
         density_index = max(self.settings_density_combo.current(), 0)
         self.settings.set("density", ("comfortable", "compact")[density_index])
         self.settings.save()

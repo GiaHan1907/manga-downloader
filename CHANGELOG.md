@@ -4,6 +4,17 @@ All notable changes to Manga Downloader are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- CTk wrappers now read the ttk style registry, so density-aware title
+  fonts (24px comfortable / 20px compact), button paddings and progress-bar
+  thickness configured there flow into the CustomTkinter rendering; fixed
+  Subtitle labels inheriting the Title font. CTk dropdowns follow the app
+  theme (Light/Dark appearance mode) instead of always rendering dark.
+- Card vertical rhythm aligned with the redesign demo (14px row gaps,
+  20px bottom breathing room).
+
 ## [1.1.1] — 2026-09-18
 
 ### Added
