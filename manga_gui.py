@@ -2051,11 +2051,15 @@ class MangaGui:
         tree.configure(height=7 if has_tasks else 1)
         if hasattr(self, "queue_card"):
             self.queue_card.rowconfigure(3, weight=1 if has_tasks else 0)
-        if hasattr(self, "queue_split"):
+        # During a theme rebuild the stale split frame is already destroyed
+        # (the new one is created after this call), so liveness must be checked
+        # or .grid() raises "bad window path name".
+        split = getattr(self, "queue_split", None)
+        if split is not None and split.winfo_exists():
             if has_tasks:
-                self.queue_split.grid()
+                split.grid()
             else:
-                self.queue_split.grid_remove()
+                split.grid_remove()
         if hasattr(self, "queue_count_label"):
             self.queue_count_label.configure(text=str(len(self.queue_tasks)) if has_tasks else "")
         for button in getattr(self, "queue_extra_buttons", []):
